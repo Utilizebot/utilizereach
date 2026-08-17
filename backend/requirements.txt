@@ -1,0 +1,56 @@
+# FastAPI & Web Server
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+websockets==12.0
+
+# Celery & Task Queue
+celery==5.3.4
+redis==5.0.1
+
+# Database
+psycopg[binary]==3.2.*
+psycopg-pool
+sqlalchemy==2.0.23
+
+# AI providers
+anthropic>=0.116.0
+
+# HTTP & Data Processing
+httpx==0.27.0
+requests==2.31.0
+beautifulsoup4==4.12.2
+lxml==4.9.3
+
+# SerpAPI for Google Search
+google-search-results==2.4.2
+
+# Environment & Configuration
+python-dotenv==1.0.0
+pydantic[email]==2.5.0
+pydantic-settings==2.1.0
+email-validator==2.1.0
+
+# CSV & Data Export
+pandas==2.1.3
+openpyxl==3.1.2
+
+# Auth & Security
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+PyJWT
+bcrypt
+
+# Utilities
+python-dateutil==2.8.2
+validators==0.22.0
+pytz==2024.1
+
+# Email Verification
+dnspython==2.4.2
+
+# Email Marketing System
+google-api-python-client==2.108.0
+google-auth-httplib2==0.2.0
+google-auth-oauthlib==1.2.0
+google-generativeai==0.3.2

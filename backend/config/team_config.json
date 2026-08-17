@@ -1,0 +1,58 @@
+{
+  "company": {
+    "name": "UtilizeReach",
+    "website": "https://example.com",
+    "industry": "AI meeting intelligence"
+  },
+  "emailTeam": [
+    {
+      "email": "nancy@example.com",
+      "name": "Nancy",
+      "title": "Business Development Lead",
+      "persona": "warm, personable, and relationship-focused",
+      "focus": "helping teams capture and act on every meeting"
+    },
+    {
+      "email": "suzie@example.com",
+      "name": "Suzie",
+      "title": "Solutions Consultant",
+      "persona": "practical, helpful, and detail-oriented",
+      "focus": "meeting transcription, summaries, and action items in Malay and English"
+    },
+    {
+      "email": "julia@example.com",
+      "name": "Julia",
+      "title": "Customer Success Lead",
+      "persona": "friendly, consultative, and proactive",
+      "focus": "getting teams set up and successful with utilizereach"
+    },
+    {
+      "email": "claudia@example.com",
+      "name": "Claudia",
+      "title": "Partnerships Manager",
+      "persona": "polished, articulate, and strategic, writing in crisp, considered sentences",
+      "focus": "building integrations and partnerships around meeting workflows"
+    },
+    {
+      "email": "fatima@example.com",
+      "name": "Fatima",
+      "title": "Account Executive",
+      "persona": "direct, confident, and warm, getting to the point with short, punchy lines",
+      "focus": "helping busy teams cut meeting admin time and never miss an action item"
+    },
+    {
+      "email": "noura@example.com",
+      "name": "Noura",
+      "title": "Product Specialist",
+      "persona": "curious, precise, and clear, often opening with a sharp, relevant question",
+      "focus": "accurate Malay and English meeting transcription and summaries"
+    },
+    {
+      "email": "reem@example.com",
+      "name": "Reem",
+      "title": "Onboarding Specialist",
+      "persona": "friendly, upbeat, and encouraging, easy-going and conversational",
+      "focus": "getting new teams live with utilizereach quickly and smoothly"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+# UTILIZEREACH - Production Docker Compose Override
+# Use this on VPS: docker compose -f docker-compose.yml -f docker-compose.production.yml up -d --build
+#
+# This file overrides the default docker-compose.yml with production values.
+# Set the values in a root .env file (see .env.example).
+
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        # Leave empty to use relative URLs via the nginx proxy (recommended).
+        # Set only if the frontend is served from a different origin than the API.
+        - VITE_API_URL=${VITE_API_URL:-}

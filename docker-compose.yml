@@ -1,0 +1,208 @@
+# ============================================
+# UTILIZEREACH - Docker Compose stack
+# AI lead generation, scraping & email outreach platform (LeadAutomation)
+# Usage: docker compose up -d --build
+# ============================================
+
+services:
+  # ============================================
+  # POSTGRES - Application Database
+  # ============================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: marketing_postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-marketing}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-marketing}
+      - POSTGRES_DB=${POSTGRES_DB:-marketing_ai}
+    ports:
+      # Bound to localhost only - not exposed to the network
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-marketing} -d ${POSTGRES_DB:-marketing_ai}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================
+  # REDIS - Message Broker for Celery
+  # ============================================
+  redis:
+    image: redis:7-alpine
+    container_name: marketing_redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${REDIS_HOST_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================
+  # BACKEND - FastAPI Application
+  # ============================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: marketing_backend
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-marketing}:${POSTGRES_PASSWORD:-marketing}@postgres:5432/${POSTGRES_DB:-marketing_ai}
+      - JWT_SECRET=${JWT_SECRET:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+    volumes:
+      - ./backend/storage:/app/storage
+      - ./backend/.gmail_tokens:/app/.gmail_tokens
+      - backend_config:/app/config
+      - shared_config:/app/shared_config
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================
+  # CELERY WORKER - Background Tasks
+  # ============================================
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: marketing_celery
+    restart: unless-stopped
+    command: celery -A celery_app.celery worker --loglevel=info --concurrency=2
+    healthcheck:
+      # override the backend image's HTTP healthcheck (worker has no web server)
+      test: ["CMD-SHELL", "celery -A celery_app.celery inspect ping --timeout 5 | grep -q pong"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-marketing}:${POSTGRES_PASSWORD:-marketing}@postgres:5432/${POSTGRES_DB:-marketing_ai}
+      - JWT_SECRET=${JWT_SECRET:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+    volumes:
+      - ./backend/storage:/app/storage
+      - ./backend/.gmail_tokens:/app/.gmail_tokens
+      - backend_config:/app/config:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_started
+
+  # ============================================
+  # CELERY BEAT - Scheduled Tasks Scheduler
+  # ============================================
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: marketing_celery_beat
+    restart: unless-stopped
+    command: celery -A celery_app.celery beat --loglevel=info
+    healthcheck:
+      # beat is a scheduler with nothing to probe; disable the inherited HTTP check
+      disable: true
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-marketing}:${POSTGRES_PASSWORD:-marketing}@postgres:5432/${POSTGRES_DB:-marketing_ai}
+      - JWT_SECRET=${JWT_SECRET:-}
+    volumes:
+      - ./backend/.gmail_tokens:/app/.gmail_tokens:ro
+      - backend_config:/app/config:ro
+      - celerybeat_schedule:/app
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      celery_worker:
+        condition: service_started
+
+  # ============================================
+  # FRONTEND - React/Vite (Nginx)
+  # ============================================
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        # Empty = use relative URLs via nginx proxy (works on any domain)
+        - VITE_API_URL=${VITE_API_URL:-}
+    container_name: marketing_frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    volumes:
+      # Mount shared config so backend can update config.json
+      - shared_config:/usr/share/nginx/html/config:ro
+    depends_on:
+      - backend
+
+  # ============================================
+  # NGINX - Reverse Proxy (SSL/Domain)
+  # ============================================
+  nginx:
+    image: nginx:alpine
+    container_name: marketing_nginx
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTP_ALT_PORT:-8080}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - ./certbot/www:/var/www/certbot:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+    depends_on:
+      - frontend
+      - backend
+
+  # ============================================
+  # CERTBOT - SSL Certificate Management
+  # ============================================
+  certbot:
+    image: certbot/certbot
+    container_name: marketing_certbot
+    volumes:
+      - ./certbot/www:/var/www/certbot
+      - ./certbot/conf:/etc/letsencrypt
+
+volumes:
+  postgres_data:
+  redis_data:
+  celerybeat_schedule:
+  shared_config:
+  backend_config:

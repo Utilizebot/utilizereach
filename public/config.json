@@ -1,0 +1,35 @@
+{
+  "setup": {
+    "completed": false,
+    "apiUrl": ""
+  },
+  "company": {
+    "name": "UtilizeReach",
+    "tagline": "AI-powered lead capture and cold-email outreach",
+    "logo": "/logo.png",
+    "website": "https://example.com",
+    "email": "hello@example.com",
+    "phone": ""
+  },
+  "branding": {
+    "primaryColor": "#2aa8e0",
+    "secondaryColor": "#0d78b0",
+    "accentColor": "#30b9eb"
+  },
+  "form": {
+    "title": "Request a demo",
+    "subtitle": "Tell us a little about your team and we'll be in touch",
+    "successMessage": "Thanks! We'll reach out shortly to get you set up."
+  },
+  "dashboard": {
+    "title": "Lead Analytics",
+    "subtitle": "Track and manage your demo requests"
+  },
+  "emailTeam": [],
+  "features": {
+    "enableScraper": true,
+    "enableScheduler": true,
+    "enableEmailTracking": true,
+    "enableAIEmails": true
+  }
+}

@@ -1,0 +1,93 @@
+# ============================================
+# Files to EXCLUDE from CodeCanyon Package
+# ============================================
+# Run: zip -r marketing-ai.zip . -x@PACKAGING_EXCLUDES.txt
+# ============================================
+
+# Git
+.git/*
+.gitignore
+
+# Environment files with real credentials
+.env
+backend/.env
+backend/.env.vps
+backend/.gmail_tokens
+backend/.gmail_tokens/*
+backend/oauth_credentials.json
+
+# Test files and personal scripts
+backend/test_*.py
+backend/send_to_*.py
+backend/send_*test*.py
+backend/trigger_*.py
+
+# Personal SQL fix files
+*.sql
+!docs/database/COMPLETE_SCHEMA.sql
+
+# Personal data files (CSV with leads)
+backend/storage/csv_files/*.csv
+
+# Root level python scripts (personal use)
+*.py
+!backend/**/*.py
+
+# Personal documentation files
+*.md
+!README.md
+!docs/**/*.md
+!backend/README.md
+!backend/docs/**/*.md
+
+# Testing files with credentials (IMPORTANT!)
+TESTING_PHASE1.md
+
+# Vercel (not needed for VPS deployment)
+.vercel/*
+vercel.json
+
+# Personal images
+*.png
+!public/*.png
+
+# Node modules and build artifacts
+node_modules/*
+dist/*
+.vite/*
+
+# Python cache
+__pycache__/*
+backend/**/__pycache__/*
+*.pyc
+*.pyo
+.pytest_cache/*
+
+# IDE files
+.vscode/*
+.idea/*
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temp files
+*.tmp
+*.temp
+*.log
+
+# Logs directory contents
+logs/*
+backend/logs/*
+
+# The zip file itself
+marketing-ai-package.zip
+marketing-ai.zip
+
+# Empty/placeholder files
+backend/.backend_pids
+
+# Supabase migrations (schema is in docs/database/)
+supabase/*

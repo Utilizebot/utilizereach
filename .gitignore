@@ -1,0 +1,89 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Environment variables
+.env
+.env.local
+.env.production
+.env.development
+.env.vps
+backend/config/.env
+shared_config/
+# ...but always keep the templates
+!.env.example
+!.env.template
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+
+# Build artifacts / release bundles
+*.zip
+*.tar.gz
+
+# Secrets & credentials — NEVER commit
+oauth_credentials.json
+token.json
+credentials.json
+gcp-oauth*
+service_account*.json
+serviceaccount*.json
+.gmail_tokens/
+.gmail_tokens
+*.gmail_tokens
+gdrive_*
+ms365_*
+onedrive_*
+mcp_servers.json
+*.lic
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+id_rsa*
+id_ed25519*
+
+# Vercel
+.vercel
+
+# Process IDs
+.frontend_pid
+
+# Lead data and personal information
+*.csv
+*.xlsx
+*.xls
+*LEADS*.csv
+*BREVO*.csv
+*_leads.csv
+WHATSAPP_MESSAGE.txt
+*REPORT*.txt
+.claude/
+*.bak
+*.bak.*
