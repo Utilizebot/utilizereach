@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/img/banner.png" alt="UtilizeReach — self-hosted, source-available cold-email &amp; lead automation, by Utilizebot" width="860">
+</p>
+
 # UtilizeReach
 
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue)](./LICENSE)
@@ -22,15 +26,14 @@ bounces in a real-time dashboard.
 
 ## Screenshots
 
-<!-- TODO: add real screenshots + a demo.gif here — highest-impact task -->
+<!-- UI previews rendered from the product design — swap in live screenshots / a demo GIF anytime -->
 
 | | |
 |---|---|
 | ![Dashboard](docs/img/dashboard.png)<br/>**Dashboard** — deliverability & engagement at a glance | ![AI emails](docs/img/emails.png)<br/>**AI emails** — per-recipient personalized drafts |
 | ![Campaigns](docs/img/campaigns.png)<br/>**Campaigns** — A/B variants & follow-up sequences | ![Analytics](docs/img/analytics.png)<br/>**Analytics** — per-persona / segment / campaign |
 
-> Screenshots are placeholders while we prep the public gallery. Star the repo to
-> get pinged when the demo lands.
+> A look inside UtilizeReach. A live interactive demo is coming — ⭐ **star the repo** to get notified.
 
 ## Why UtilizeReach
 
