@@ -1,0 +1,42 @@
+name: Feature request
+description: Suggest an idea or improvement for UtilizeReach.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement to **UtilizeReach**.
+
+        Please describe the problem you're trying to solve before the solution — it helps us understand the underlying need and consider alternatives.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / use case
+      description: What are you trying to accomplish? What problem does this solve, and who does it affect?
+      placeholder: As an agency running multiple client segments, I need to schedule follow-ups per-timezone so emails land during business hours.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: A clear and concise description of what you want to happen.
+      placeholder: Add a per-segment timezone setting that the paced sender respects when scheduling follow-ups.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any alternative solutions or workarounds you've considered.
+      placeholder: I currently split campaigns manually by timezone, which is error-prone.
+    validations:
+      required: false
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution
+      options:
+        - label: I am willing to help implement this feature (open a PR).
+          required: false

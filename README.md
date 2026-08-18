@@ -1,5 +1,12 @@
 # UtilizeReach
 
+[![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue)](./LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/Utilizebot/utilizereach?style=social)](https://github.com/Utilizebot/utilizereach/stargazers)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)](#contributing)
+[![Made with FastAPI](https://img.shields.io/badge/made%20with-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white)](https://react.dev/)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
+
 **By [Utilizebot](https://github.com/Utilizebot).** A self-hosted platform for
 AI-assisted lead capture and cold-email outreach — scrape and import leads,
 segment them, generate personalized emails with an LLM, send them from multiple
@@ -9,8 +16,33 @@ bounces in a real-time dashboard.
 > **License:** [PolyForm Noncommercial 1.0.0](./LICENSE) (source-available).
 > **Noncommercial use is free** (personal, research, evaluation, education,
 > nonprofits, government). **Any commercial use requires a separate commercial
-> license from Utilizebot** — see [Commercial license](#commercial-license)
+> license from Utilizebot** — see
+> [Commercial license & managed hosting](#-commercial-license--managed-hosting)
 > below. This is a source-available license, not an OSI "open source" license.
+
+## Screenshots
+
+<!-- TODO: add real screenshots + a demo.gif here — highest-impact task -->
+
+| | |
+|---|---|
+| ![Dashboard](docs/img/dashboard.png)<br/>**Dashboard** — deliverability & engagement at a glance | ![AI emails](docs/img/emails.png)<br/>**AI emails** — per-recipient personalized drafts |
+| ![Campaigns](docs/img/campaigns.png)<br/>**Campaigns** — A/B variants & follow-up sequences | ![Analytics](docs/img/analytics.png)<br/>**Analytics** — per-persona / segment / campaign |
+
+> Screenshots are placeholders while we prep the public gallery. Star the repo to
+> get pinged when the demo lands.
+
+## Why UtilizeReach
+
+- **Own your data / self-host.** Leads, mailboxes, and analytics stay on your
+  server — nothing routed through a third-party SaaS.
+- **No per-seat pricing.** Add users, personas, and mailboxes without a bill that
+  scales with your headcount.
+- **Source-available.** Read, audit, and modify the whole stack — no black box.
+- **One stack, end to end.** Scrape → segment → generate → send → track →
+  analyze, without stitching together four tools.
+- **LLM-agnostic.** Bring Claude, Gemini, OpenAI, or any OpenAI-compatible
+  endpoint (Ollama, self-hosted) — swap providers from Settings.
 
 ## Features
 
@@ -44,10 +76,37 @@ bounces in a real-time dashboard.
 | Delivery  | Docker Compose |
 | Email     | Gmail API (send-as aliases) |
 
+## An open-source alternative to Instantly, Lemlist, Smartlead & Apollo
+
+Instantly, Lemlist, Smartlead, and Apollo are polished, well-supported managed
+SaaS products — if you want a hosted tool and don't mind cloud pricing, they're
+great. UtilizeReach competes on a different axis: **self-hosting, data
+ownership, and pricing model.** Feature-wise the outreach engine is comparable;
+where UtilizeReach differs is that you run it on your own server and own every
+row.
+
+| | **UtilizeReach** | Instantly / Lemlist / Smartlead / Apollo |
+|---|:---:|:---:|
+| Self-hosted | ✅ | ❌ (cloud SaaS) |
+| Own your data / on-prem | ✅ | ❌ (data on their cloud) |
+| Source-available code | ✅ | ❌ (proprietary) |
+| Pricing model | Free noncommercial · commercial license for business use | Paid SaaS, per seat |
+| Multi-inbox / sender personas | ✅ | ✅ |
+| Warm-up pacing | ✅ | ✅ |
+| A/B + follow-up sequences | ✅ | ✅ |
+| Open / click / reply tracking | ✅ | ✅ |
+| AI email generation | ✅ (bring your own LLM) | ✅ |
+| Built-in lead scraper | ✅ | ✅ (varies by product) |
+| Unsubscribe + compliance tooling | ✅ | ✅ |
+
+The takeaway isn't "they can't track or warm up" — they can. It's that with
+UtilizeReach **the whole stack runs on infrastructure you control, with no
+per-seat bill.**
+
 ## Quick start
 
 ```bash
-git clone <your-fork-url> utilizereach
+git clone https://github.com/Utilizebot/utilizereach.git
 cd utilizereach
 
 # 1. Copy and fill in environment variables
@@ -97,6 +156,23 @@ and connect under **Email Accounts**.
   from `ops/smart_sender.py` (schedule with cron); reply + bounce handling from
   `ops/reply_handler.py` and `ops/bounce_handler.py`.
 
+## 💼 Commercial license & managed hosting
+
+**Noncommercial use is free** — personal, research, evaluation, education,
+nonprofits, and government use are covered by the
+[PolyForm Noncommercial 1.0.0](./LICENSE) license at no cost.
+
+**Commercial, business, or production use requires a commercial license from
+Utilizebot** — this includes running outreach for a business, offering
+UtilizeReach (or a derivative) as a hosted/managed service, or any use for
+commercial advantage.
+
+**A hosted / managed version is available** if you'd rather not run the
+infrastructure yourself. Join the waitlist or request a commercial license by:
+
+- Opening an issue on this repository, or
+- Reaching the Utilizebot org at <https://github.com/Utilizebot>.
+
 ## Security notes
 
 - All secrets live in `.env` files (git-ignored). Do not commit `.env`, OAuth
@@ -104,7 +180,10 @@ and connect under **Email Accounts**.
 - The public tracking/form endpoints should be rate-limited behind your reverse
   proxy before production use.
 - You are responsible for complying with anti-spam and data-protection law
-  (CAN-SPAM, GDPR, PDPA, etc.) in the jurisdictions you email into.
+  (CAN-SPAM, GDPR, PDPA, etc.) in the jurisdictions you email into. UtilizeReach
+  ships one-click unsubscribe, exclusion lists, automatic bounce handling, and
+  warm-up pacing to support **legitimate, permission-based** outreach — consent
+  is your responsibility.
 
 ## Contributing
 
@@ -112,9 +191,12 @@ Issues and PRs are welcome. By contributing you agree your contributions are
 licensed under the repository's license. Note the commercial-use restriction
 above.
 
-## Commercial license
+## License
 
 Commercial or production use — running outreach for a business, offering it (or
 a derivative) as a hosted/managed service, or any use for commercial advantage —
 requires a commercial license from **Utilizebot**. To request one, open an issue
 on this repository or contact Utilizebot via <https://github.com/Utilizebot>.
+See [Commercial license & managed hosting](#-commercial-license--managed-hosting)
+for details, and [LICENSE](./LICENSE) for the full PolyForm Noncommercial 1.0.0
+text.

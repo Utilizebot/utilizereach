@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💼 Commercial license / hosted version
+    url: https://github.com/Utilizebot/utilizereach/issues/new
+    about: UtilizeReach is source-available under PolyForm Noncommercial 1.0.0. Any commercial, production, or business use requires a separate commercial license. Open an issue to request a commercial license or the managed/hosted version.
+  - name: 💬 Questions & Discussions
+    url: https://github.com/Utilizebot/utilizereach/discussions
+    about: Have a question, need setup help, or want to share how you use UtilizeReach? Start a discussion.

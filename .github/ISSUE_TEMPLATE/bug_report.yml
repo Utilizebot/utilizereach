@@ -1,0 +1,85 @@
+name: Bug report
+description: Report a reproducible problem in UtilizeReach so we can fix it.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report for **UtilizeReach**.
+
+        Before you continue, please:
+        - Search [existing issues](https://github.com/Utilizebot/utilizereach/issues) to avoid duplicates.
+        - Fill in as much detail as you can — reproducible reports get fixed fastest.
+        - **Never paste secrets.** Redact API keys, OAuth tokens, Gmail credentials, `.env` values, database URLs, and any personal data (real names/emails) before submitting.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear and concise description of the bug, including what you observed.
+      placeholder: When I start a warm-up campaign, the sender pauses after the first email and never resumes.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Exact steps so we can reproduce the behavior.
+      placeholder: |
+        1. Go to Campaigns > New campaign
+        2. Add a segment with 10 leads
+        3. Enable auto-ramp and start the campaign
+        4. Observe the sender stops after the first send
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What you expected to happen instead.
+      placeholder: The paced sender should continue sending at the configured daily rate.
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment-method
+    attributes:
+      label: Deployment method
+      description: How are you running UtilizeReach?
+      options:
+        - Docker Compose (recommended)
+        - Docker (manual)
+        - Local dev (uvicorn + Vite)
+        - Other / custom
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Deployment info
+      description: Versions and environment details.
+      value: |
+        - UtilizeReach version / commit:
+        - Docker version (`docker --version`):
+        - Docker Compose version (`docker compose version`):
+        - Host OS:
+        - Browser (if a UI bug):
+        - LLM provider (Claude / Gemini / OpenAI / OpenAI-compatible):
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Backend / frontend logs
+      description: Relevant log output. This will be automatically formatted as code, so no backticks needed. **Redact secrets first.**
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: no-secrets
+    attributes:
+      label: Confirmation
+      options:
+        - label: I have removed all secrets (API keys, OAuth tokens, Gmail credentials, `.env` values, database URLs) and personal data from this report.
+          required: true
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
