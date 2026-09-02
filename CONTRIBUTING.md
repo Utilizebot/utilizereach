@@ -144,6 +144,19 @@ UtilizeReach is a tool for **legitimate, permission-based** outreach. It ships w
 
 ---
 
+## Contributor License Agreement (CLA)
+
+By submitting a contribution (a pull request, patch, or any code/content) to this project, you agree that:
+
+1. **You have the right to submit it** — it is your original work, or you have permission to contribute it, and it does not knowingly violate anyone else's rights.
+2. **You grant Utilizebot broad rights.** You grant Utilizebot a perpetual, worldwide, non-exclusive, royalty-free, irrevocable license to use, reproduce, modify, adapt, publish, sublicense, and distribute your contribution and derivative works — **including as part of a commercial product or a commercially-licensed edition of UtilizeReach** — under any license terms Utilizebot chooses.
+3. **The community still gets it too.** Your contribution is also made available to everyone under the project's [PolyForm Noncommercial 1.0.0](./LICENSE) license.
+4. **You keep your copyright.** You retain ownership of your contribution; this is a license grant, not an assignment.
+
+Please **sign off your commits** to certify the above — `git commit -s` adds a `Signed-off-by:` line (per the [Developer Certificate of Origin](https://developercertificate.org/)).
+
+---
+
 ## Code of Conduct
 
 Participation in this project is governed by our [Code of Conduct](CODE_OF_CONDUCT.md). By taking part, you agree to uphold it.

@@ -190,9 +190,15 @@ infrastructure yourself. Join the waitlist or request a commercial license by:
 
 ## Contributing
 
-Issues and PRs are welcome. By contributing you agree your contributions are
-licensed under the repository's license. Note the commercial-use restriction
-above.
+Contributions are welcome — the flow is the standard GitHub one:
+
+1. **Fork** this repo to your account.
+2. Create a **branch** and make your change.
+3. Open a **Pull Request** back here — we review and merge.
+
+See **[CONTRIBUTING.md](./CONTRIBUTING.md)** for local setup, the PR checklist, and the **Contributor License Agreement** — your contributions are licensed to Utilizebot for use (including commercially) while staying available to everyone under PolyForm Noncommercial.
+
+New here? Look for [`good first issue`](https://github.com/Utilizebot/utilizereach/labels/good%20first%20issue) and [`help wanted`](https://github.com/Utilizebot/utilizereach/labels/help%20wanted). Questions or ideas → [Discussions](https://github.com/Utilizebot/utilizereach/discussions).
 
 ## License
 
