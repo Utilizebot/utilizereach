@@ -36,6 +36,7 @@ MAX_TOTAL = int(os.getenv("MAX_TOTAL", "0"))
 RAMP = os.getenv("RAMP", "0") == "1"          # auto warmup ramp (ignores DAILY_CAP/MAX_TOTAL)
 RAMP_SCHEDULE = [20, 30, 45, 60, 80]          # per-day cap by week since first send
 BACKEND_URL = os.getenv("BACKEND_URL", "https://utilizereach.example.com")
+FOLLOWUP_ENGAGED_ONLY = os.getenv("FOLLOWUP_ENGAGED_ONLY", "0") == "1"  # follow up only with contacts who opened/clicked the prior email (per-campaign flag can also enable it)
 EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 MYT = timezone(timedelta(hours=8))
 CTA = "https://example.com"
@@ -135,6 +136,7 @@ def next_lead(segs):
         f"SELECT id, email, decision_maker_name AS name, company_name AS company FROM scraped_leads "
         f"WHERE segment IN ({ph}) AND status='new' AND email IS NOT NULL "
         f"AND NOT EXISTS (SELECT 1 FROM sent_emails s WHERE lower(s.recipient_email)=lower(scraped_leads.email)) "
+        f"AND NOT EXISTS (SELECT 1 FROM email_exclusions x WHERE lower(x.email)=lower(scraped_leads.email)) "
         f"ORDER BY created_at ASC LIMIT 25", segs)
     for r in rows:
         email = (r["email"] or "").strip()
@@ -173,16 +175,31 @@ def sleep_until_window():
 def ramp_cap(sb):
     """Warmup ramp: per-day cap grows by week since the first-ever send."""
     r = execute_sql("SELECT min(sent_at) m FROM sent_emails")
-    first = r[0]["m"] if r else None
-    if not first or not hasattr(first, "tzinfo"):
+    first = _as_dt(r[0]["m"] if r else None)
+    if not first:
         return RAMP_SCHEDULE[0]
     weeks = max(0, (datetime.now(timezone.utc) - first).days // 7)
     return RAMP_SCHEDULE[min(weeks, len(RAMP_SCHEDULE) - 1)]
 
 
+def _as_dt(v):
+    """execute_sql jsonifies DB timestamps to ISO strings; parse back to an aware
+    datetime (UTC if naive). Returns None on failure."""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        try:
+            v = datetime.fromisoformat(v)
+        except ValueError:
+            return None
+    if getattr(v, "tzinfo", None) is None:
+        v = v.replace(tzinfo=timezone.utc)
+    return v
+
+
 def _fu_campaigns(sb):
     return execute_sql(
-        "SELECT id, name, followups FROM campaigns WHERE status IN ('active','completed') "
+        "SELECT id, name, followups, COALESCE(followup_engaged_only, false) engaged_only FROM campaigns WHERE status IN ('active','completed') "
         "AND jsonb_array_length(COALESCE(followups,'[]'::jsonb)) > 0") or []
 
 
@@ -195,12 +212,14 @@ def next_followup(sb):
         return None
     fu_by = {c["id"]: (c.get("followups") or []) for c in camps}
     name_by = {c["id"]: c["name"] for c in camps}
+    gate_by = {c["id"]: bool(c.get("engaged_only")) for c in camps}   # engagement-gate per campaign
     ids = list(fu_by.keys())
     ph = ",".join(["%s"] * len(ids))
     rows = execute_sql(
         f"SELECT recipient_email, recipient_name, campaign_id, count(*) touches, "
         f"max(sent_at) last_sent, bool_or(replied_at IS NOT NULL) replied, "
         f"bool_or(bounced_at IS NOT NULL) bounced, "
+        f"bool_or(opened_at IS NOT NULL) opened, bool_or(clicked_at IS NOT NULL) clicked, "
         f"(array_agg(from_email ORDER BY sent_at DESC))[1] last_persona "
         f"FROM sent_emails WHERE campaign_id IN ({ph}) AND recipient_email IS NOT NULL "
         f"GROUP BY recipient_email, recipient_name, campaign_id", ids) or []
@@ -213,20 +232,22 @@ def next_followup(sb):
         email = (r["recipient_email"] or "").lower()
         if not email or email in exc:
             continue
+        if (FOLLOWUP_ENGAGED_ONLY or gate_by.get(r["campaign_id"], False)) and not (r["opened"] or r["clicked"]):
+            continue                                   # engagement-gated: only follow up with openers/clickers
         fus = fu_by[r["campaign_id"]]
         idx = (r["touches"] or 1) - 1          # touch #1 = initial -> next follow-up index 0
         if idx < 0 or idx >= len(fus):
             continue
-        last = r["last_sent"]
-        if not hasattr(last, "tzinfo"):
+        last = _as_dt(r["last_sent"])            # jsonified to an ISO string — parse back
+        if last is None:
             continue
         after = int(fus[idx].get("after_days", 4) or 4)
         if (now - last).total_seconds() < after * 86400:
             continue
-        if best is None or r["last_sent"] < best["last_sent"]:
+        if best is None or last < best["last_sent"]:
             best = {"email": email, "name": r["recipient_name"], "campaign_id": r["campaign_id"],
                     "campaign_name": name_by[r["campaign_id"]], "step": fus[idx], "idx": idx,
-                    "persona_email": r["last_persona"], "last_sent": r["last_sent"]}
+                    "persona_email": r["last_persona"], "last_sent": last}
     return best
 
 

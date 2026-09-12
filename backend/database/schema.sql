@@ -995,3 +995,4 @@ CREATE INDEX IF NOT EXISTS idx_sent_emails_variant ON sent_emails(campaign_id, v
 
 -- Follow-up sequence steps per campaign: [{after_days, subject, body}, ...]
 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS followups JSONB DEFAULT '[]'::jsonb;
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS followup_engaged_only BOOLEAN DEFAULT false;
