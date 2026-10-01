@@ -27,8 +27,8 @@ class Variant(BaseModel):
 
 class Followup(BaseModel):
     after_days: int = 4
-    subject: str
-    body: str
+    subject: str = ""                   # optional — AI campaigns generate the copy from ai_brief
+    body: str = ""
 
 
 class CampaignCreate(BaseModel):
@@ -39,7 +39,13 @@ class CampaignCreate(BaseModel):
     daily_cap: int = 20
     variants: List[Variant] = []
     followups: List[Followup] = []
+    followup_engaged_only: bool = False  # only follow up with contacts who opened/clicked
     status: str = "active"              # active | draft | paused
+
+
+class FollowupUpdate(BaseModel):
+    followups: List[Followup] = []
+    followup_engaged_only: bool = False
 
 
 def _stats_row(cid: str) -> dict:
@@ -74,6 +80,8 @@ async def list_campaigns():
                 "segment": c.get("segment"), "status": c.get("status", "draft"),
                 "target_count": target, "daily_cap": c.get("daily_cap"),
                 "variant_count": len(c.get("variants") or []),
+                "followup_count": len(c.get("followups") or []),
+                "followup_engaged_only": bool(c.get("followup_engaged_only")),
                 "created_at": c.get("created_at"),
                 "progress": round(s["sent"] / target * 100, 1) if target else 0.0,
                 **s,
@@ -131,6 +139,7 @@ async def campaign_detail(cid: str):
                 "segment": c.get("segment"), "status": c.get("status"),
                 "target_count": c.get("target_count"), "daily_cap": c.get("daily_cap"),
                 "variants": c.get("variants") or [], "followups": c.get("followups") or [],
+                "followup_engaged_only": bool(c.get("followup_engaged_only")),
                 "created_at": c.get("created_at"),
             },
             "stats": _stats_row(cid),
@@ -161,6 +170,7 @@ async def create_campaign(payload: CampaignCreate):
             "daily_cap": payload.daily_cap,
             "variants": variants,
             "followups": [f.dict() for f in payload.followups],
+            "followup_engaged_only": payload.followup_engaged_only,
             "status": payload.status,
         }
         row = {k: v for k, v in row.items() if v is not None}
@@ -185,6 +195,24 @@ async def set_status(cid: str, body: dict):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to set status: {e}")
+
+
+@router.post("/{cid}/update-followups")
+async def update_followups(cid: str, payload: FollowupUpdate):
+    """Edit a live campaign's follow-up sequence + engagement gate from the UI."""
+    try:
+        sb = get_supabase_admin_client()
+        res = sb.table("campaigns").update({
+            "followups": [f.dict() for f in payload.followups],
+            "followup_engaged_only": payload.followup_engaged_only,
+        }).eq("id", cid).execute()
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        return {"success": True, "campaign": res.data[0]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update follow-ups: {e}")
 
 
 @router.delete("/remove/{cid}")

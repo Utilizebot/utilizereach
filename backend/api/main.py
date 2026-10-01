@@ -20,6 +20,7 @@ from api.routers import nexus_migration, nexus_agents, nexus_stakeholders
 from api.routers import segments
 from api.routers import campaigns_mgmt
 from api.routers import analytics_outbound
+from api.routers import insights
 from api.routers import unsubscribe
 from api.routers import lead_activity
 from api.routers import stream
@@ -164,6 +165,7 @@ app.include_router(nexus_stakeholders.router)
 app.include_router(segments.router)
 app.include_router(campaigns_mgmt.router)
 app.include_router(analytics_outbound.router)
+app.include_router(insights.router)
 app.include_router(unsubscribe.router)
 app.include_router(stream.router)
 app.include_router(social_media.router)

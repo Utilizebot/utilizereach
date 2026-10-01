@@ -12,6 +12,7 @@ import { Emails } from './pages/Emails';
 import { Campaigns } from './pages/Campaigns';
 import { Replies } from './pages/Replies';
 import { OutboundAnalytics } from './pages/OutboundAnalytics';
+import { WhatsWinning } from './pages/WhatsWinning';
 import { EmailAccounts } from './pages/EmailAccounts';
 import { AgentStream } from './pages/AgentStream';
 import { SocialMedia } from './pages/SocialMedia';
@@ -151,6 +152,18 @@ function AppContent() {
             <ProtectedRoute>
               <DashboardLayout>
                 <OutboundAnalytics />
+              </DashboardLayout>
+            </ProtectedRoute>
+          }
+        />
+
+        {/* What's Winning — outbound performance + AI recommendations */}
+        <Route
+          path="/winning"
+          element={
+            <ProtectedRoute>
+              <DashboardLayout>
+                <WhatsWinning />
               </DashboardLayout>
             </ProtectedRoute>
           }
