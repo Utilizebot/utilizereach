@@ -319,7 +319,7 @@ def main():
             # 2) otherwise a new campaign send, else the fallback drip
             camp = active_campaign(sb)
             if camp:
-                lead = next_lead([camp["segment"]])
+                lead = next_lead([seg.strip() for seg in (camp["segment"] or "").split(",") if seg.strip()])
                 if not lead:
                     execute_sql("UPDATE campaigns SET status='completed' WHERE id=%s", [camp["id"]])
                     print(f"campaign '{camp['name']}' segment exhausted -> completed", flush=True); continue
