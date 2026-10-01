@@ -14,8 +14,11 @@ import os
 # Add parent directory to import path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from api.dependencies import get_current_user
+from api.dependencies import get_current_user, require_permission
 from api.security import create_access_token, hash_password, verify_password
+from api.permissions import (
+    ROLES, MEMBER, canonical_role, permissions_for, role_catalog, ROLE_LABELS,
+)
 from database.client import get_supabase_admin_client
 from database.pg import execute_sql
 
@@ -51,6 +54,12 @@ class ChangePasswordRequest(BaseModel):
 def _public_user(row: dict) -> dict:
     row = dict(row)
     row.pop("password_hash", None)
+    # Surface the effective role + its permission set so the frontend can gate
+    # UI consistently with the backend (single source of truth = permissions.py).
+    role = canonical_role(row.get("role"))
+    row["role"] = role
+    row["role_label"] = ROLE_LABELS.get(role, role.title())
+    row["permissions"] = permissions_for(role)
     return row
 
 
@@ -60,7 +69,7 @@ def _admin_exists() -> bool:
 
 
 def _token_response(row: dict) -> dict:
-    token = create_access_token(row["id"], row["email"], row.get("role", "sales_rep"))
+    token = create_access_token(row["id"], row["email"], canonical_role(row.get("role")))
     return {
         "access_token": token,
         "token_type": "bearer",
@@ -81,6 +90,9 @@ async def login(request: LoginRequest):
     row = result.data[0]
     if not verify_password(request.password, row.get("password_hash") or ""):
         raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    if row.get("is_active") is False:
+        raise HTTPException(status_code=403, detail="This account has been deactivated. Contact an administrator.")
 
     # Update last_login server-side (used to be a fire-and-forget from the browser)
     updated = execute_sql(
@@ -112,11 +124,11 @@ async def register(request: RegisterRequest, authorization: Optional[str] = Head
         role = "admin"
     else:
         current = await get_current_user(authorization)
-        if current.get("role") != "admin":
+        if canonical_role(current.get("role")) != "admin":
             raise HTTPException(status_code=403, detail="Only admins can register new users")
-        role = request.role or "sales_rep"
+        role = canonical_role(request.role) if request.role else MEMBER
 
-    if role not in ("admin", "sales_rep"):
+    if role not in ROLES:
         raise HTTPException(status_code=400, detail=f"Invalid role: {role}")
 
     client = get_supabase_admin_client()
@@ -222,7 +234,7 @@ class AdminCreateUser(BaseModel):
     email: str
     full_name: str
     password: str
-    role: Optional[str] = "sales_rep"
+    role: Optional[str] = MEMBER
 
 
 class AdminResetPassword(BaseModel):
@@ -235,33 +247,36 @@ class AdminUpdateUser(BaseModel):
     is_active: Optional[bool] = None
 
 
-def _ensure_admin(current_user: dict):
-    if current_user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
+@router.get("/roles")
+async def list_roles(current_user: dict = Depends(get_current_user)):
+    """Role catalog (value, label, description, permissions) for role pickers."""
+    return {"roles": role_catalog()}
 
 
 @router.get("/users")
-async def list_users(current_user: dict = Depends(get_current_user)):
-    """List all users (admins only)."""
-    _ensure_admin(current_user)
+async def list_users(current_user: dict = Depends(require_permission("users.view"))):
+    """List all users (managers + admins)."""
     rows = execute_sql(
         "SELECT id, email, full_name, role, is_active, last_login, created_at "
         "FROM sales_reps ORDER BY created_at DESC"
     )
-    return {"users": rows or []}
+    rows = rows or []
+    for r in rows:
+        r["role"] = canonical_role(r.get("role"))
+        r["role_label"] = ROLE_LABELS.get(r["role"], r["role"].title())
+    return {"users": rows}
 
 
 @router.post("/users")
-async def admin_create_user(request: AdminCreateUser, current_user: dict = Depends(get_current_user)):
+async def admin_create_user(request: AdminCreateUser, current_user: dict = Depends(require_permission("users.manage"))):
     """Create a user (admins only)."""
-    _ensure_admin(current_user)
     email = request.email.strip().lower()
     if not email or "@" not in email:
         raise HTTPException(status_code=400, detail="A valid email is required")
     if len(request.password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
-    role = request.role or "sales_rep"
-    if role not in ("admin", "sales_rep"):
+    role = canonical_role(request.role) if request.role else MEMBER
+    if role not in ROLES:
         raise HTTPException(status_code=400, detail=f"Invalid role: {role}")
     client = get_supabase_admin_client()
     existing = client.table("sales_reps").select("*").eq("email", email).execute()
@@ -284,9 +299,8 @@ async def admin_create_user(request: AdminCreateUser, current_user: dict = Depen
 
 @router.post("/users/{user_id}/reset-password")
 async def admin_reset_password(user_id: str, request: AdminResetPassword,
-                               current_user: dict = Depends(get_current_user)):
+                               current_user: dict = Depends(require_permission("users.manage"))):
     """Set a new password for any user (admins only)."""
-    _ensure_admin(current_user)
     if len(request.new_password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
     rows = execute_sql(
@@ -300,15 +314,18 @@ async def admin_reset_password(user_id: str, request: AdminResetPassword,
 
 @router.patch("/users/{user_id}")
 async def admin_update_user(user_id: str, request: AdminUpdateUser,
-                            current_user: dict = Depends(get_current_user)):
+                            current_user: dict = Depends(require_permission("users.manage"))):
     """Update a user's name / role / active status (admins only)."""
-    _ensure_admin(current_user)
     updates = {k: v for k, v in request.dict().items() if v is not None}
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
-    if "role" in updates and updates["role"] not in ("admin", "sales_rep"):
-        raise HTTPException(status_code=400, detail="Invalid role")
-    if user_id == current_user["id"] and (updates.get("role") == "sales_rep" or updates.get("is_active") is False):
+    if "role" in updates:
+        updates["role"] = canonical_role(updates["role"])
+        if updates["role"] not in ROLES:
+            raise HTTPException(status_code=400, detail="Invalid role")
+    if user_id == current_user["id"] and (
+        (updates.get("role") and updates["role"] != "admin") or updates.get("is_active") is False
+    ):
         raise HTTPException(status_code=400, detail="You cannot demote or deactivate your own account")
     client = get_supabase_admin_client()
     res = client.table("sales_reps").update(updates).eq("id", user_id).execute()
@@ -318,15 +335,14 @@ async def admin_update_user(user_id: str, request: AdminUpdateUser,
 
 
 @router.delete("/users/{user_id}")
-async def admin_delete_user(user_id: str, current_user: dict = Depends(get_current_user)):
+async def admin_delete_user(user_id: str, current_user: dict = Depends(require_permission("users.manage"))):
     """Delete a user (admins only). Guards against self-delete and last-admin."""
-    _ensure_admin(current_user)
     if user_id == current_user["id"]:
         raise HTTPException(status_code=400, detail="You cannot delete your own account")
     target = execute_sql("SELECT role FROM sales_reps WHERE id = %s", [user_id])
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
-    if target[0]["role"] == "admin":
+    if canonical_role(target[0]["role"]) == "admin":
         admins = execute_sql("SELECT id FROM sales_reps WHERE role = 'admin'")
         if len(admins) <= 1:
             raise HTTPException(status_code=400, detail="Cannot delete the last admin")

@@ -4,8 +4,10 @@ Works directly without Celery workers. Uses the multi-provider LLM client
 (integrations.llm_client) configured in email_ai_settings.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from fastapi.concurrency import run_in_threadpool
+
+from api.dependencies import require_permission
 from pydantic import BaseModel
 from typing import Optional
 import os
@@ -222,7 +224,7 @@ def get_oauth_account():
 
 
 @router.post("/preview", response_model=PreviewEmailResponse)
-async def preview_test_email(request: PreviewEmailRequest):
+async def preview_test_email(request: PreviewEmailRequest, _perm: dict = Depends(require_permission("emails.send"))):
     """
     Generate a test email via AI (no sending). Returns subject + body for user review.
     """
@@ -249,7 +251,7 @@ async def preview_test_email(request: PreviewEmailRequest):
 
 
 @router.post("/send", response_model=TestEmailResponse)
-async def send_test_email(request: TestEmailRequest):
+async def send_test_email(request: TestEmailRequest, _perm: dict = Depends(require_permission("emails.send"))):
     """
     Send a personalized test email.
     If subject/body_html/body_text are provided (from a preview), skips AI generation.

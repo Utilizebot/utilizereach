@@ -3,8 +3,10 @@ Leads Router
 API endpoints for lead management and funnel tracking
 """
 
-from fastapi import APIRouter, HTTPException, Query, UploadFile, File
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Depends
 from fastapi.responses import StreamingResponse
+
+from api.dependencies import require_permission
 import sys
 import pandas as pd
 import io
@@ -330,7 +332,7 @@ async def get_leads(
 
 
 @router.post("/")
-async def create_lead(lead_data: dict):
+async def create_lead(lead_data: dict, _perm: dict = Depends(require_permission("leads.edit"))):
     """
     Create a single lead manually
 
@@ -606,7 +608,7 @@ async def get_lead_details(lead_id: str):
 
 
 @router.post("/{lead_id}/note")
-async def add_lead_note(lead_id: str, note: dict):
+async def add_lead_note(lead_id: str, note: dict, _perm: dict = Depends(require_permission("leads.edit"))):
     """
     Add a note to a lead
 
@@ -625,7 +627,7 @@ async def add_lead_note(lead_id: str, note: dict):
 
 
 @router.put("/{lead_id}/status")
-async def update_lead_status(lead_id: str, status_data: dict):
+async def update_lead_status(lead_id: str, status_data: dict, _perm: dict = Depends(require_permission("leads.edit"))):
     """
     Update lead status
 
@@ -657,7 +659,7 @@ async def update_lead_status(lead_id: str, status_data: dict):
 
 
 @router.post("/preview")
-async def preview_import(file: UploadFile = File(...)):
+async def preview_import(file: UploadFile = File(...), _perm: dict = Depends(require_permission("leads.import"))):
     """
     Preview file columns before importing
 
@@ -734,7 +736,8 @@ async def preview_import(file: UploadFile = File(...)):
 async def import_leads_from_file(
     file: UploadFile = File(...),
     column_mappings: Optional[str] = None,
-    segment: Optional[str] = None
+    segment: Optional[str] = None,
+    _perm: dict = Depends(require_permission("leads.import"))
 ):
     """
     Import leads from uploaded Excel or CSV file
@@ -1009,7 +1012,7 @@ async def import_leads_from_file(
 
 
 @router.delete("/{lead_id}")
-async def delete_lead(lead_id: str):
+async def delete_lead(lead_id: str, _perm: dict = Depends(require_permission("leads.delete"))):
     """
     Delete a lead from scraped_leads table
 
@@ -1039,7 +1042,7 @@ async def delete_lead(lead_id: str):
 
 
 @router.post("/bulk-delete")
-async def bulk_delete_leads(lead_ids: List[str]):
+async def bulk_delete_leads(lead_ids: List[str], _perm: dict = Depends(require_permission("leads.delete"))):
     """
     Delete multiple leads at once
 
@@ -1070,7 +1073,7 @@ async def bulk_delete_leads(lead_ids: List[str]):
 
 
 @router.delete("/by-email/{email}")
-async def delete_lead_by_email(email: str):
+async def delete_lead_by_email(email: str, _perm: dict = Depends(require_permission("leads.delete"))):
     """
     Delete a lead by email address
 
@@ -1236,7 +1239,7 @@ async def download_template():
 
 
 @router.patch("/sent-emails/{email_id}/mark-replied")
-async def mark_email_replied(email_id: str):
+async def mark_email_replied(email_id: str, _perm: dict = Depends(require_permission("leads.edit"))):
     """Manually mark a sent email as replied and create an email_replies record."""
     try:
         supabase = get_supabase()
@@ -1278,7 +1281,7 @@ async def mark_email_replied(email_id: str):
 
 
 @router.post("/sync-replies")
-async def sync_replies():
+async def sync_replies(_perm: dict = Depends(require_permission("leads.edit"))):
     """
     Poll Gmail threads for replies and update sent_emails + email_replies tables.
     Uses the active email account credentials to check each stored gmail_thread_id.

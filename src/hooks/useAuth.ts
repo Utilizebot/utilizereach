@@ -37,7 +37,16 @@ interface AuthState {
   // Helper flags
   isAuthenticated: boolean;
   isAdmin: boolean;
+  isManager: boolean;
+  isMember: boolean;
+  isViewer: boolean;
+  /** @deprecated use isMember — kept for backward-compat with older call sites */
   isSalesRep: boolean;
+
+  // Effective permissions for the current user (resolved server-side from role)
+  permissions: string[];
+  /** True if the current user holds `permission` (admins always pass). */
+  can: (permission: string) => boolean;
 }
 
 interface AuthActions {
@@ -171,7 +180,13 @@ export function useAuth(): AuthState & AuthActions {
   // Helper flags
   const isAuthenticated = !!user && !!salesRep;
   const isAdmin = salesRep?.role === 'admin';
-  const isSalesRep = salesRep?.role === 'sales_rep';
+  const isManager = salesRep?.role === 'manager';
+  const isMember = salesRep?.role === 'member';
+  const isViewer = salesRep?.role === 'viewer';
+  const isSalesRep = isMember; // backward-compat alias
+
+  const permissions = salesRep?.permissions ?? [];
+  const can = (permission: string): boolean => isAdmin || permissions.includes(permission);
 
   return {
     // State
@@ -181,7 +196,12 @@ export function useAuth(): AuthState & AuthActions {
     initializing,
     isAuthenticated,
     isAdmin,
+    isManager,
+    isMember,
+    isViewer,
     isSalesRep,
+    permissions,
+    can,
 
     // Actions
     signIn,
@@ -192,9 +212,9 @@ export function useAuth(): AuthState & AuthActions {
 }
 
 /**
- * Helper function to check if user has required role
+ * Helper function to check if user has required role (admins pass everything)
  */
-export function hasRole(salesRep: SalesRep | null, requiredRole: 'admin' | 'sales_rep'): boolean {
+export function hasRole(salesRep: SalesRep | null, requiredRole: import('../types/scraper').UserRole): boolean {
   if (!salesRep) return false;
 
   // Admins have access to everything
@@ -202,6 +222,16 @@ export function hasRole(salesRep: SalesRep | null, requiredRole: 'admin' | 'sale
 
   // Check specific role
   return salesRep.role === requiredRole;
+}
+
+/**
+ * Helper to check a permission against a sales rep's resolved permission list.
+ * Admins always pass. Mirrors backend api/permissions.py.
+ */
+export function hasPermission(salesRep: SalesRep | null, permission: string): boolean {
+  if (!salesRep) return false;
+  if (salesRep.role === 'admin') return true;
+  return (salesRep.permissions ?? []).includes(permission);
 }
 
 /**

@@ -3,7 +3,9 @@ Scheduler Router
 API endpoints for automated campaign scheduler settings and control
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
+
+from api.dependencies import require_permission
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, timedelta
@@ -66,7 +68,7 @@ async def get_scheduler_settings():
 
 
 @router.put("/settings")
-async def update_scheduler_settings(settings: SchedulerSettingsUpdate):
+async def update_scheduler_settings(settings: SchedulerSettingsUpdate, _perm: dict = Depends(require_permission("settings.manage"))):
     """
     Update scheduler settings
 
@@ -152,7 +154,7 @@ async def update_scheduler_settings(settings: SchedulerSettingsUpdate):
 
 
 @router.post("/toggle")
-async def toggle_scheduler(enable: bool):
+async def toggle_scheduler(enable: bool, _perm: dict = Depends(require_permission("settings.manage"))):
     """
     Quick toggle to enable/disable the scheduler
 
@@ -207,7 +209,7 @@ async def toggle_scheduler(enable: bool):
 
 
 @router.post("/run-now")
-async def trigger_manual_run():
+async def trigger_manual_run(_perm: dict = Depends(require_permission("settings.manage"))):
     """
     Manually trigger the scheduled campaign immediately
 
@@ -335,7 +337,7 @@ async def get_scheduler_status():
 
 
 @router.delete("/history/{run_id}")
-async def delete_run_history(run_id: str):
+async def delete_run_history(run_id: str, _perm: dict = Depends(require_permission("settings.manage"))):
     """Delete a specific run history record"""
     try:
         supabase = get_supabase()
@@ -348,7 +350,7 @@ async def delete_run_history(run_id: str):
 
 
 @router.delete("/history")
-async def clear_run_history():
+async def clear_run_history(_perm: dict = Depends(require_permission("settings.manage"))):
     """Clear all run history records"""
     try:
         supabase = get_supabase()

@@ -15,7 +15,7 @@ import os
 # Add parent directory to import path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from api.dependencies import get_current_user
+from api.dependencies import get_current_user, require_permission
 from database.client import get_supabase_admin_client
 
 router = APIRouter(prefix="/api/api-keys", tags=["api-keys"])
@@ -50,7 +50,7 @@ def _get_owned_key(client, key_id: str, current_user: dict) -> dict:
 
 
 @router.get("/")
-async def list_api_keys(current_user: dict = Depends(get_current_user)):
+async def list_api_keys(current_user: dict = Depends(require_permission("apikeys.manage"))):
     """List API keys (admins: all, sales reps: own), newest first"""
     try:
         client = get_supabase_admin_client()
@@ -64,7 +64,7 @@ async def list_api_keys(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/")
-async def create_api_key(request: ApiKeyCreate, current_user: dict = Depends(get_current_user)):
+async def create_api_key(request: ApiKeyCreate, current_user: dict = Depends(require_permission("apikeys.manage"))):
     """Create an API key assigned to the current user"""
     payload = {
         "key_name": request.key_name,
@@ -88,7 +88,7 @@ async def create_api_key(request: ApiKeyCreate, current_user: dict = Depends(get
 
 
 @router.put("/{key_id}")
-async def update_api_key(key_id: str, request: ApiKeyUpdate, current_user: dict = Depends(get_current_user)):
+async def update_api_key(key_id: str, request: ApiKeyUpdate, current_user: dict = Depends(require_permission("apikeys.manage"))):
     """Update an API key (name/key/active/limit)"""
     updates = {}
     if request.key_name is not None:
@@ -116,7 +116,7 @@ async def update_api_key(key_id: str, request: ApiKeyUpdate, current_user: dict 
 
 
 @router.delete("/{key_id}")
-async def delete_api_key(key_id: str, current_user: dict = Depends(get_current_user)):
+async def delete_api_key(key_id: str, current_user: dict = Depends(require_permission("apikeys.manage"))):
     """Delete an API key"""
     try:
         client = get_supabase_admin_client()

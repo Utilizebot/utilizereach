@@ -3,7 +3,9 @@ Campaigns Router
 API endpoints for campaign management and execution
 """
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
+
+from api.dependencies import require_permission
 from pydantic import BaseModel
 from typing import Optional
 import os
@@ -411,7 +413,7 @@ async def run_campaign_background(max_emails: int, delay_seconds: int, segment: 
 
 
 @router.post("/start")
-async def start_campaign(request: CampaignStartRequest, background_tasks: BackgroundTasks):
+async def start_campaign(request: CampaignStartRequest, background_tasks: BackgroundTasks, _perm: dict = Depends(require_permission("emails.send"))):
     """
     Start an email campaign
 

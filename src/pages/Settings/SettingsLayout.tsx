@@ -31,7 +31,7 @@ interface NavItem {
   path: string;
   label: string;
   icon: React.ReactNode;
-  adminOnly?: boolean;
+  permission?: string; // hidden unless the current user holds this permission
 }
 
 const navItems: NavItem[] = [
@@ -44,24 +44,25 @@ const navItems: NavItem[] = [
     path: '/settings/users',
     label: 'Users',
     icon: <Users size={20} />,
-    adminOnly: true,
+    permission: 'users.view',
   },
   {
     path: '/settings/scheduler',
     label: 'Automated Campaigns',
     icon: <Clock size={20} />,
+    permission: 'settings.manage',
   },
   {
     path: '/settings/email-ai',
     label: 'AI Email Settings',
     icon: <Sparkles size={20} />,
-    adminOnly: true,
+    permission: 'settings.manage',
   },
   {
     path: '/settings/api-keys',
     label: 'API Keys',
     icon: <Key size={20} />,
-    adminOnly: true,
+    permission: 'apikeys.manage',
   },
   {
     path: '/settings/scraper',
@@ -117,11 +118,11 @@ const quickNavItems = [
 
 export function SettingsLayout() {
   const navigate = useNavigate();
-  const { salesRep, isAdmin } = useAuth();
+  const { salesRep, isAdmin, can } = useAuth();
 
-  // Filter nav items based on user role
+  // Filter nav items based on the current user's permissions
   const visibleNavItems = navItems.filter(
-    item => !item.adminOnly || isAdmin
+    item => !item.permission || can(item.permission)
   );
 
   return (
@@ -169,7 +170,7 @@ export function SettingsLayout() {
                   {salesRep?.full_name}
                 </p>
                 <p className="text-xs text-gray-600">
-                  {isAdmin ? 'Administrator' : 'Sales Representative'}
+                  {salesRep?.role_label || (isAdmin ? 'Administrator' : 'Member')}
                 </p>
               </div>
             </div>

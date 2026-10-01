@@ -4,7 +4,7 @@ FastAPI Main Application
 Production-ready backend for UtilizeReach
 """
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import sys
@@ -26,7 +26,15 @@ from api.routers import lead_activity
 from api.routers import stream
 from api.routers import social_media
 from api.routers import social_accounts
+from api.dependencies import get_current_user
 from utils.redis_client import subscribe_to_progress
+
+# Blanket authentication for protected routers. Applied at include time so every
+# endpoint in these routers requires a valid, active account. Per-endpoint
+# require_permission(...) inside the routers then gates specific actions
+# (create/edit/delete/manage). Reads need only authentication, since in the
+# action-gating model every role (including Viewer) may read.
+_AUTH = [Depends(get_current_user)]
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -141,35 +149,57 @@ async def initialize_shared_config():
     except Exception as e:
         print(f"[Startup] Error initializing shared config: {e}")
 
-# Include routers
-app.include_router(scraper.router)
+# ---------------------------------------------------------------------------
+# Routers
+#
+# PUBLIC (no router-level auth):
+#   - email_tracking (/track) : open pixel, click + unsubscribe links
+#   - tracking (/api/tracking) : web-analytics ingestion from the public form
+#   - unsubscribe (/api/unsubscribe) : recipient-facing
+#   - setup (/api/setup) : first-run wizard (guards its own mutations)
+#   - auth (/api/auth) : login/register/status are public; its protected
+#     endpoints declare their own dependency
+#   - chat (/api/chat) : public-site lead-gen widget
+#   - stream + nexus (/api/stream, /api/v1/*) : Server-Sent-Events endpoints.
+#     EventSource cannot send an Authorization header, so these are left open
+#     in v1 RBAC. TODO: add query-param token auth, then protect them.
+#
+# PROTECTED (blanket auth via _AUTH; mutations further gated by
+# require_permission inside each router):
+# ---------------------------------------------------------------------------
 app.include_router(email_tracking.router)
-app.include_router(lead_activity.router)  # before leads.router so /activity isn't shadowed by /{lead_id}
-app.include_router(leads.router)
-app.include_router(emails.router)
-app.include_router(email_accounts.router)
-app.include_router(campaigns.router)
-app.include_router(exclusions.router)
-app.include_router(scheduler.router)
 app.include_router(setup.router)
-app.include_router(email_ai_settings.router)
 app.include_router(chat.router)
-app.include_router(test_email.router)
 app.include_router(auth.router)
 app.include_router(tracking.router)
-app.include_router(analytics.router)
-app.include_router(api_keys.router)
+app.include_router(unsubscribe.router)
+app.include_router(stream.router)
 app.include_router(nexus_migration.router)
 app.include_router(nexus_agents.router)
 app.include_router(nexus_stakeholders.router)
-app.include_router(segments.router)
-app.include_router(campaigns_mgmt.router)
-app.include_router(analytics_outbound.router)
-app.include_router(insights.router)
-app.include_router(unsubscribe.router)
-app.include_router(stream.router)
-app.include_router(social_media.router)
-app.include_router(social_accounts.router)
+# email_accounts is NOT blanket-protected: its GET /google/callback is a browser
+# redirect from Google and cannot carry an Authorization header. Its reads and
+# mutations are instead gated per-endpoint inside the router (get_current_user /
+# require_permission("accounts.manage")); only the OAuth callback stays public.
+app.include_router(email_accounts.router)
+
+app.include_router(scraper.router, dependencies=_AUTH)
+app.include_router(lead_activity.router, dependencies=_AUTH)  # before leads.router so /activity isn't shadowed by /{lead_id}
+app.include_router(leads.router, dependencies=_AUTH)
+app.include_router(emails.router, dependencies=_AUTH)
+app.include_router(campaigns.router, dependencies=_AUTH)
+app.include_router(exclusions.router, dependencies=_AUTH)
+app.include_router(scheduler.router, dependencies=_AUTH)
+app.include_router(email_ai_settings.router, dependencies=_AUTH)
+app.include_router(test_email.router, dependencies=_AUTH)
+app.include_router(analytics.router, dependencies=_AUTH)
+app.include_router(analytics_outbound.router, dependencies=_AUTH)
+app.include_router(api_keys.router, dependencies=_AUTH)
+app.include_router(segments.router, dependencies=_AUTH)
+app.include_router(campaigns_mgmt.router, dependencies=_AUTH)
+app.include_router(insights.router, dependencies=_AUTH)
+app.include_router(social_media.router, dependencies=_AUTH)
+app.include_router(social_accounts.router, dependencies=_AUTH)
 
 # WebSocket connection manager
 class ConnectionManager:

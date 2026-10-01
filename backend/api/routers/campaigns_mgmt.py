@@ -10,7 +10,9 @@ clash with the existing campaigns router (/start, /status).
 """
 import re
 from typing import Optional, List
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
+
+from api.dependencies import require_permission
 from pydantic import BaseModel
 
 from database.client import get_supabase_admin_client
@@ -155,7 +157,7 @@ async def campaign_detail(cid: str):
 
 
 @router.post("/create")
-async def create_campaign(payload: CampaignCreate):
+async def create_campaign(payload: CampaignCreate, _perm: dict = Depends(require_permission("campaigns.create"))):
     try:
         sb = get_supabase_admin_client()
         # normalize variant labels A, B, C...
@@ -181,7 +183,7 @@ async def create_campaign(payload: CampaignCreate):
 
 
 @router.post("/{cid}/set-status")
-async def set_status(cid: str, body: dict):
+async def set_status(cid: str, body: dict, _perm: dict = Depends(require_permission("campaigns.edit"))):
     status = (body or {}).get("status")
     if status not in ("active", "paused", "draft", "completed"):
         raise HTTPException(status_code=400, detail="Invalid status")
@@ -198,7 +200,7 @@ async def set_status(cid: str, body: dict):
 
 
 @router.post("/{cid}/update-followups")
-async def update_followups(cid: str, payload: FollowupUpdate):
+async def update_followups(cid: str, payload: FollowupUpdate, _perm: dict = Depends(require_permission("campaigns.edit"))):
     """Edit a live campaign's follow-up sequence + engagement gate from the UI."""
     try:
         sb = get_supabase_admin_client()
@@ -216,7 +218,7 @@ async def update_followups(cid: str, payload: FollowupUpdate):
 
 
 @router.delete("/remove/{cid}")
-async def remove_campaign(cid: str):
+async def remove_campaign(cid: str, _perm: dict = Depends(require_permission("campaigns.delete"))):
     try:
         sb = get_supabase_admin_client()
         # detach sends (keep them, just clear the link)

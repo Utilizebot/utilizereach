@@ -24,8 +24,24 @@ function suggestPassword(name: string) {
 const fmtDate = (d?: string | null) =>
   d ? new Date(d).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
 
+// Mirrors backend api/permissions.py role set.
+const ROLE_OPTIONS = [
+  { value: 'admin', label: 'Admin' },
+  { value: 'manager', label: 'Manager' },
+  { value: 'member', label: 'Member' },
+  { value: 'viewer', label: 'Viewer' },
+];
+const roleStyle = (r: string) =>
+  r === 'admin' ? 'bg-purple-100 text-purple-700'
+    : r === 'manager' ? 'bg-indigo-100 text-indigo-700'
+      : r === 'member' ? 'bg-gray-100 text-gray-600'
+        : 'bg-amber-100 text-amber-700';
+const roleLabel = (r: string) => ROLE_OPTIONS.find((o) => o.value === r)?.label || r;
+
 export function UsersSettings() {
-  const { isAdmin } = useAuth();
+  const { can } = useAuth();
+  const canView = can('users.view');
+  const canManage = can('users.manage');
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
@@ -39,7 +55,7 @@ export function UsersSettings() {
     } catch { /* ignore */ }
     setLoading(false);
   };
-  useEffect(() => { if (isAdmin) fetchUsers(); }, [isAdmin]);
+  useEffect(() => { if (canView) fetchUsers(); }, [canView]);
 
   const toggleActive = async (u: User) => {
     await fetch(`${API_BASE}/api/auth/users/${u.id}`, {
@@ -48,8 +64,8 @@ export function UsersSettings() {
     });
     fetchUsers();
   };
-  const toggleRole = async (u: User) => {
-    const next = u.role === 'admin' ? 'sales_rep' : 'admin';
+  const changeRole = async (u: User, next: string) => {
+    if (next === u.role) return;
     const res = await fetch(`${API_BASE}/api/auth/users/${u.id}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify({ role: next }),
@@ -68,12 +84,12 @@ export function UsersSettings() {
     fetchUsers();
   };
 
-  if (!isAdmin) {
+  if (!canView) {
     return (
       <div className="bg-white rounded-2xl border border-gray-200 p-10 text-center shadow-sm">
         <Shield className="h-12 w-12 text-gray-300 mx-auto mb-3" />
-        <p className="font-semibold text-gray-800">Admins only</p>
-        <p className="text-sm text-gray-500 mt-1">You need an admin account to manage users.</p>
+        <p className="font-semibold text-gray-800">No access</p>
+        <p className="text-sm text-gray-500 mt-1">You don't have permission to view the team.</p>
       </div>
     );
   }
@@ -87,13 +103,15 @@ export function UsersSettings() {
           </div>
           <div>
             <h2 className="text-xl font-bold text-gray-900">Users</h2>
-            <p className="text-sm text-gray-500">Add team members, set roles, reset passwords</p>
+            <p className="text-sm text-gray-500">{canManage ? 'Add team members, set roles, reset passwords' : 'Your team and their roles'}</p>
           </div>
         </div>
-        <button onClick={() => setShowAdd(true)}
-          className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 text-white font-medium shadow hover:shadow-lg transition-all">
-          <UserPlus className="h-4 w-4" /> Add User
-        </button>
+        {canManage && (
+          <button onClick={() => setShowAdd(true)}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 text-white font-medium shadow hover:shadow-lg transition-all">
+            <UserPlus className="h-4 w-4" /> Add User
+          </button>
+        )}
       </div>
 
       <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
@@ -119,27 +137,45 @@ export function UsersSettings() {
                       <div className="text-sm text-gray-500">{u.email}</div>
                     </td>
                     <td className="px-6 py-3">
-                      <button onClick={() => toggleRole(u)} title="Toggle role"
-                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold ${
-                          u.role === 'admin' ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-600'}`}>
-                        {u.role === 'admin' ? <ShieldCheck className="h-3.5 w-3.5" /> : <Shield className="h-3.5 w-3.5" />}
-                        {u.role === 'admin' ? 'Admin' : 'Member'}
-                      </button>
+                      {canManage ? (
+                        <select value={u.role} onChange={(e) => changeRole(u, e.target.value)} title="Change role"
+                          className={`text-xs font-semibold rounded-lg border border-gray-200 px-2 py-1 focus:ring-2 focus:ring-indigo-500 ${roleStyle(u.role)}`}>
+                          {ROLE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                        </select>
+                      ) : (
+                        <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold ${roleStyle(u.role)}`}>
+                          {u.role === 'admin' ? <ShieldCheck className="h-3.5 w-3.5" /> : <Shield className="h-3.5 w-3.5" />}
+                          {roleLabel(u.role)}
+                        </span>
+                      )}
                     </td>
                     <td className="px-6 py-3">
-                      <button onClick={() => toggleActive(u)}
-                        className={`inline-flex items-center gap-1 text-xs font-medium ${u.is_active ? 'text-emerald-600' : 'text-gray-400'}`}>
-                        {u.is_active ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
-                        {u.is_active ? 'Active' : 'Inactive'}
-                      </button>
+                      {canManage ? (
+                        <button onClick={() => toggleActive(u)}
+                          className={`inline-flex items-center gap-1 text-xs font-medium ${u.is_active ? 'text-emerald-600' : 'text-gray-400'}`}>
+                          {u.is_active ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
+                          {u.is_active ? 'Active' : 'Inactive'}
+                        </button>
+                      ) : (
+                        <span className={`inline-flex items-center gap-1 text-xs font-medium ${u.is_active ? 'text-emerald-600' : 'text-gray-400'}`}>
+                          {u.is_active ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
+                          {u.is_active ? 'Active' : 'Inactive'}
+                        </span>
+                      )}
                     </td>
                     <td className="px-6 py-3 text-sm text-gray-500">{fmtDate(u.last_login)}</td>
                     <td className="px-6 py-3">
                       <div className="flex items-center justify-end gap-1">
-                        <button onClick={() => setResetFor(u)} title="Reset password"
-                          className="p-2 rounded-lg hover:bg-indigo-50 text-gray-400 hover:text-indigo-600"><KeyRound className="h-4 w-4" /></button>
-                        <button onClick={() => removeUser(u)} title="Delete user"
-                          className="p-2 rounded-lg hover:bg-red-50 text-gray-400 hover:text-red-600"><Trash2 className="h-4 w-4" /></button>
+                        {canManage ? (
+                          <>
+                            <button onClick={() => setResetFor(u)} title="Reset password"
+                              className="p-2 rounded-lg hover:bg-indigo-50 text-gray-400 hover:text-indigo-600"><KeyRound className="h-4 w-4" /></button>
+                            <button onClick={() => removeUser(u)} title="Delete user"
+                              className="p-2 rounded-lg hover:bg-red-50 text-gray-400 hover:text-red-600"><Trash2 className="h-4 w-4" /></button>
+                          </>
+                        ) : (
+                          <span className="text-xs text-gray-300">—</span>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -168,7 +204,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 function AddUserModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
   const [email, setEmail] = useState('');
   const [name, setName] = useState('');
-  const [role, setRole] = useState('sales_rep');
+  const [role, setRole] = useState('member');
   const [password, setPassword] = useState('');
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
@@ -201,8 +237,7 @@ function AddUserModal({ onClose, onDone }: { onClose: () => void; onDone: () => 
         <div className="grid grid-cols-2 gap-3">
           <Field label="Role">
             <select value={role} onChange={(e) => setRole(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg">
-              <option value="sales_rep">Member</option>
-              <option value="admin">Admin</option>
+              {ROLE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
           </Field>
           <Field label="Password">

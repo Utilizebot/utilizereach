@@ -4,11 +4,12 @@ Generates platform-specific content using the existing LLM stack
 and manages a post draft queue.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
 import uuid
 
+from api.dependencies import require_permission
 from integrations.llm_client import get_llm_client
 from config import get_company_info
 from database.pg import execute_sql
@@ -97,7 +98,7 @@ TONE_DESCRIPTIONS = {
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.post("/generate")
-async def generate_content(req: GenerateRequest):
+async def generate_content(req: GenerateRequest, _perm: dict = Depends(require_permission("social.manage"))):
     """Generate social media content using the configured LLM."""
     spec = PLATFORM_SPECS.get(req.platform.lower())
     if not spec:
@@ -163,7 +164,7 @@ async def list_posts(platform: Optional[str] = None, status: Optional[str] = Non
 
 
 @router.post("/posts")
-async def save_post(req: SavePostRequest):
+async def save_post(req: SavePostRequest, _perm: dict = Depends(require_permission("social.manage"))):
     """Save a generated post as a draft."""
     try:
         post_id = str(uuid.uuid4())
@@ -179,7 +180,7 @@ async def save_post(req: SavePostRequest):
 
 
 @router.patch("/posts/{post_id}")
-async def update_post(post_id: str, req: UpdatePostRequest):
+async def update_post(post_id: str, req: UpdatePostRequest, _perm: dict = Depends(require_permission("social.manage"))):
     """Update post content or status."""
     try:
         sets, params = [], []
@@ -201,7 +202,7 @@ async def update_post(post_id: str, req: UpdatePostRequest):
 
 
 @router.delete("/posts/{post_id}")
-async def delete_post(post_id: str):
+async def delete_post(post_id: str, _perm: dict = Depends(require_permission("social.manage"))):
     """Delete a post from the queue."""
     try:
         execute_sql("DELETE FROM social_media_posts WHERE id = %s", [post_id])

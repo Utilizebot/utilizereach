@@ -3,7 +3,9 @@ Emails Router
 API endpoints for email management and tracking
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
+
+from api.dependencies import require_permission
 from typing import Optional
 from datetime import datetime, timedelta
 
@@ -328,7 +330,7 @@ async def get_reply_details(reply_id: str):
 
 
 @router.put("/replies/{reply_id}/status")
-async def update_reply_status(reply_id: str, status_data: dict):
+async def update_reply_status(reply_id: str, status_data: dict, _perm: dict = Depends(require_permission("emails.send"))):
     """
     Mark reply as reviewed or update status
     """
@@ -412,7 +414,7 @@ async def get_email_performance(
 
 
 @router.post("/send-to-lead")
-async def send_email_to_lead(request_data: dict):
+async def send_email_to_lead(request_data: dict, _perm: dict = Depends(require_permission("emails.send"))):
     """
     Send a single AI-generated email to a specific lead
 
