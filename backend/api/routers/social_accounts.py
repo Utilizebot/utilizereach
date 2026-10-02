@@ -9,7 +9,7 @@ Credential fields by platform:
   instagram – ig_account_id, access_token  (same Facebook app token)
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
 import requests
@@ -20,6 +20,7 @@ import hmac
 import time
 import uuid
 
+from api.dependencies import require_permission
 from database.pg import execute_sql
 
 router = APIRouter(prefix="/api/social-accounts", tags=["social-accounts"])
@@ -106,7 +107,7 @@ async def get_account(platform: str):
 
 
 @router.put("/{platform}")
-async def update_account(platform: str, req: UpdateAccountRequest):
+async def update_account(platform: str, req: UpdateAccountRequest, _perm: dict = Depends(require_permission("social.manage"))):
     """Save credentials and mark the account as connected."""
     VALID = {"linkedin", "tiktok", "facebook", "instagram"}
     if platform not in VALID:
@@ -120,7 +121,7 @@ async def update_account(platform: str, req: UpdateAccountRequest):
 
 
 @router.delete("/{platform}/disconnect")
-async def disconnect(platform: str):
+async def disconnect(platform: str, _perm: dict = Depends(require_permission("social.manage"))):
     """Clear credentials and mark disconnected."""
     execute_sql("""
         UPDATE social_media_accounts
@@ -131,7 +132,7 @@ async def disconnect(platform: str):
 
 
 @router.post("/{platform}/test")
-async def test_connection(platform: str):
+async def test_connection(platform: str, _perm: dict = Depends(require_permission("social.manage"))):
     """Quick API call to verify the stored credentials work."""
     creds = _get_creds(platform)
     try:
@@ -194,7 +195,7 @@ async def test_connection(platform: str):
 
 
 @router.post("/post")
-async def post_to_platform(req: PostRequest):
+async def post_to_platform(req: PostRequest, _perm: dict = Depends(require_permission("social.manage"))):
     """Post content to the specified social media platform."""
     platform = req.platform.lower()
     creds = _get_creds(platform)

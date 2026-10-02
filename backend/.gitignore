@@ -50,3 +50,6 @@ Thumbs.db
 
 # Gmail OAuth tokens (KEEP SECRET!)
 .gmail_tokens
+
+# Auto-generated JWT signing secret (KEEP SECRET! generated at runtime)
+.jwt_secret

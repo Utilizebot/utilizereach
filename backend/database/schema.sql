@@ -140,7 +140,7 @@ CREATE TABLE IF NOT EXISTS sales_reps (
     auth_user_id UUID DEFAULT gen_random_uuid(),
     email TEXT UNIQUE NOT NULL,
     full_name TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'sales_rep' CHECK (role IN ('admin', 'sales_rep')),
+    role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('admin', 'manager', 'member', 'viewer')),
     -- UTM defaults for campaign tracking
     utm_source TEXT DEFAULT 'email',
     utm_medium TEXT DEFAULT 'campaign',
@@ -160,6 +160,19 @@ ALTER TABLE sales_reps ADD COLUMN IF NOT EXISTS password_hash TEXT;
 ALTER TABLE sales_reps ADD COLUMN IF NOT EXISTS last_login TIMESTAMPTZ;
 ALTER TABLE sales_reps ADD COLUMN IF NOT EXISTS phone TEXT;
 ALTER TABLE sales_reps ADD COLUMN IF NOT EXISTS auth_user_id UUID DEFAULT gen_random_uuid();
+
+-- RBAC: expand roles (admin, sales_rep) -> (admin, manager, member, viewer).
+-- Drop the old CHECK first so the legacy->canonical UPDATE can run, migrate
+-- 'sales_rep' to 'member', then re-add the widened constraint. Idempotent.
+DO $$
+BEGIN
+    ALTER TABLE sales_reps DROP CONSTRAINT IF EXISTS sales_reps_role_check;
+    UPDATE sales_reps SET role = 'member' WHERE role = 'sales_rep';
+    ALTER TABLE sales_reps
+        ADD CONSTRAINT sales_reps_role_check CHECK (role IN ('admin', 'manager', 'member', 'viewer'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+ALTER TABLE sales_reps ALTER COLUMN role SET DEFAULT 'member';
 
 CREATE INDEX IF NOT EXISTS idx_sales_reps_email ON sales_reps(email);
 CREATE INDEX IF NOT EXISTS idx_sales_reps_auth_user_id ON sales_reps(auth_user_id);

@@ -10,6 +10,8 @@ is a data operation, not a code change.
 import re
 from typing import Optional, List
 from fastapi import APIRouter, HTTPException, Depends
+
+from api.dependencies import require_permission
 from pydantic import BaseModel
 
 from database.client import get_supabase_admin_client
@@ -87,7 +89,7 @@ async def list_segments():
 
 @router.post("")
 @router.post("/")
-async def create_segment(payload: SegmentCreate):
+async def create_segment(payload: SegmentCreate, _perm: dict = Depends(require_permission("segments.manage"))):
     """Create a new segment. Only admins can add segments."""
     try:
         supabase = get_supabase()
@@ -114,7 +116,7 @@ async def create_segment(payload: SegmentCreate):
 
 
 @router.patch("/{key}")
-async def update_segment(key: str, payload: SegmentUpdate):
+async def update_segment(key: str, payload: SegmentUpdate, _perm: dict = Depends(require_permission("segments.manage"))):
     """Update a segment's label/description/color/active/order."""
     try:
         supabase = get_supabase()
@@ -134,7 +136,7 @@ async def update_segment(key: str, payload: SegmentUpdate):
 
 
 @router.delete("/{key}")
-async def delete_segment(key: str):
+async def delete_segment(key: str, _perm: dict = Depends(require_permission("segments.manage"))):
     """Delete a segment. Leads keep existing but are set back to unsegmented."""
     try:
         supabase = get_supabase()
@@ -147,7 +149,7 @@ async def delete_segment(key: str):
 
 
 @router.post("/{key}/assign")
-async def assign_leads(key: str, payload: AssignRequest):
+async def assign_leads(key: str, payload: AssignRequest, _perm: dict = Depends(require_permission("segments.manage"))):
     """Assign a set of leads to a segment (reclassify)."""
     try:
         supabase = get_supabase()

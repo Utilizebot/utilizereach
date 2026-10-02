@@ -159,6 +159,26 @@ and connect under **Email Accounts**.
   from `ops/smart_sender.py` (schedule with cron); reply + bounce handling from
   `ops/reply_handler.py` and `ops/bounce_handler.py`.
 
+## Roles & permissions
+
+UtilizeReach has built-in role-based access control. The first account created in
+the Setup Wizard is the **Admin**; admins add teammates and assign roles in
+**Settings → Users**.
+
+| Role | Can do |
+|------|--------|
+| **Admin** | Everything, including managing users, mailboxes, API keys, and system settings. |
+| **Manager** | Run the whole outreach operation — create/edit/delete campaigns, import/work/delete leads, send, manage segments & exclusions, view the team. Cannot manage users, credentials, or system settings. |
+| **Member** | Create & run campaigns, import and work leads, send email, run the scraper. Cannot delete campaigns/leads or change team/config. |
+| **Viewer** | Read-only access to dashboards, campaigns, leads, and analytics. |
+
+Permissions are **action-gated** (every authenticated user can read; roles decide
+who can create/edit/delete/manage) and defined in one place —
+`backend/api/permissions.py`. Each action API requires the matching permission
+(`require_permission`), and the frontend mirrors the same matrix via the
+`permissions` list on `/api/auth/me`. To add a capability, add the permission
+string, grant it to the right roles, and depend on it in the endpoint.
+
 ## 💼 Commercial license & managed hosting
 
 **Noncommercial use is free** — personal, research, evaluation, education,

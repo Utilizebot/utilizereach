@@ -3,7 +3,9 @@ Email Exclusions Router
 Manage emails that should be excluded from campaigns
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
+
+from api.dependencies import require_permission
 from pydantic import BaseModel, EmailStr
 from typing import List, Optional
 
@@ -50,7 +52,7 @@ async def get_exclusions():
 
 
 @router.post("/")
-async def add_exclusion(exclusion: ExclusionCreate):
+async def add_exclusion(exclusion: ExclusionCreate, _perm: dict = Depends(require_permission("exclusions.manage"))):
     """
     Add an email to the exclusion list
 
@@ -90,7 +92,7 @@ async def add_exclusion(exclusion: ExclusionCreate):
 
 
 @router.delete("/{exclusion_id}")
-async def remove_exclusion(exclusion_id: str):
+async def remove_exclusion(exclusion_id: str, _perm: dict = Depends(require_permission("exclusions.manage"))):
     """
     Remove an email from the exclusion list
 
@@ -122,7 +124,7 @@ async def remove_exclusion(exclusion_id: str):
 
 
 @router.post("/bulk")
-async def add_bulk_exclusions(emails: List[str], reason: Optional[str] = None):
+async def add_bulk_exclusions(emails: List[str], reason: Optional[str] = None, _perm: dict = Depends(require_permission("exclusions.manage"))):
     """
     Add multiple emails to exclusion list at once
 

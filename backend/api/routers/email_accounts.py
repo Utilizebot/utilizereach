@@ -4,8 +4,10 @@ API endpoints for managing email sending accounts and viewing their statistics
 Includes Google OAuth integration for Gmail accounts
 """
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import RedirectResponse
+
+from api.dependencies import require_permission, get_current_user
 import os
 import json
 
@@ -73,7 +75,7 @@ def get_supabase():
 
 
 @router.get("/")
-async def get_all_accounts():
+async def get_all_accounts(_user: dict = Depends(get_current_user)):
     """
     Get all email accounts with their current statistics
 
@@ -170,7 +172,7 @@ async def get_all_accounts():
 
 
 @router.get("/stats")
-async def get_accounts_summary():
+async def get_accounts_summary(_user: dict = Depends(get_current_user)):
     """
     Get summary statistics across all email accounts
 
@@ -219,7 +221,7 @@ async def get_accounts_summary():
 
 
 @router.get("/personas")
-async def get_sending_personas():
+async def get_sending_personas(_user: dict = Depends(get_current_user)):
     """List the AI sending personas (from team config). These are the
     identities campaigns rotate through — each sends via the connected
     base account using its own send-as alias."""
@@ -250,7 +252,7 @@ async def get_sending_personas():
 
 
 @router.get("/{account_id}")
-async def get_account_details(account_id: str):
+async def get_account_details(account_id: str, _user: dict = Depends(get_current_user)):
     """
     Get detailed information about a specific email account
 
@@ -315,7 +317,7 @@ async def get_account_details(account_id: str):
 
 
 @router.put("/{account_id}/status")
-async def update_account_status(account_id: str, status_data: dict):
+async def update_account_status(account_id: str, status_data: dict, _perm: dict = Depends(require_permission("accounts.manage"))):
     """
     Update account status (active/paused/blocked)
 
@@ -379,7 +381,7 @@ def get_google_oauth_flow(redirect_uri: str) -> Flow:
 
 
 @router.get("/google/auth")
-async def google_auth_start(request: Request):
+async def google_auth_start(request: Request, _perm: dict = Depends(require_permission("accounts.manage"))):
     """
     Start Google OAuth flow
     Returns the authorization URL to redirect user to Google
@@ -515,7 +517,7 @@ async def google_auth_callback(request: Request, code: str = None, error: str = 
 
 
 @router.delete("/google/{account_id}")
-async def disconnect_google_account(account_id: str):
+async def disconnect_google_account(account_id: str, _perm: dict = Depends(require_permission("accounts.manage"))):
     """
     Disconnect a Google account (remove OAuth tokens)
     """

@@ -207,16 +207,16 @@ function AppContent() {
 
           {/* Settings Pages */}
           <Route path="profile" element={<ProfileSettings />} />
-          <Route path="users" element={<UsersSettings />} />
+          <Route path="users" element={<ProtectedRoute requiredPermission="users.view"><UsersSettings /></ProtectedRoute>} />
 
           {/* Automated Campaign Scheduler */}
-          <Route path="scheduler" element={<SchedulerSettings />} />
+          <Route path="scheduler" element={<ProtectedRoute requiredPermission="settings.manage"><SchedulerSettings /></ProtectedRoute>} />
 
           {/* AI Email Settings - Admin Only */}
-          <Route path="email-ai" element={<EmailAISettings />} />
+          <Route path="email-ai" element={<ProtectedRoute requiredPermission="settings.manage"><EmailAISettings /></ProtectedRoute>} />
 
           {/* API Keys Management - Phase 2 */}
-          <Route path="api-keys" element={<ApiKeysSettings />} />
+          <Route path="api-keys" element={<ProtectedRoute requiredPermission="apikeys.manage"><ApiKeysSettings /></ProtectedRoute>} />
           <Route
             path="scraper"
             element={

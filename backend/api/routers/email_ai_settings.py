@@ -4,6 +4,8 @@ API endpoints for managing AI email generation settings
 """
 
 from fastapi import APIRouter, HTTPException, Depends
+
+from api.dependencies import require_permission
 from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
@@ -147,7 +149,7 @@ async def get_email_ai_settings():
 
 
 @router.put("")
-async def update_email_ai_settings(settings: EmailAISettingsUpdate):
+async def update_email_ai_settings(settings: EmailAISettingsUpdate, _perm: dict = Depends(require_permission("settings.manage"))):
     """
     Update email AI settings (Admin only - checked in frontend)
 
@@ -243,7 +245,7 @@ async def update_email_ai_settings(settings: EmailAISettingsUpdate):
 
 
 @router.post("/reset")
-async def reset_email_ai_settings():
+async def reset_email_ai_settings(_perm: dict = Depends(require_permission("settings.manage"))):
     """
     Reset email AI settings to defaults (Admin only)
 
@@ -358,7 +360,7 @@ class ProviderTestRequest(BaseModel):
 
 
 @router.post("/test-provider")
-async def test_ai_provider(request: ProviderTestRequest):
+async def test_ai_provider(request: ProviderTestRequest, _perm: dict = Depends(require_permission("settings.manage"))):
     """
     Test an AI provider configuration with a tiny round-trip generation.
     Fields left empty fall back to the saved settings / environment.

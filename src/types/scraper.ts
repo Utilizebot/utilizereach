@@ -12,7 +12,11 @@
 // Enums and Constants
 // ============================================================================
 
-export type UserRole = 'admin' | 'sales_rep';
+export type UserRole = 'admin' | 'manager' | 'member' | 'viewer';
+
+// A permission string "<resource>.<action>" (mirrors backend api/permissions.py).
+// The backend returns the user's full permission list on /api/auth/me.
+export type Permission = string;
 
 export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -40,8 +44,10 @@ export interface SalesRep {
   email: string;
   full_name: string;
 
-  // Role
+  // Role + effective permissions (permissions resolved server-side from role)
   role: UserRole;
+  role_label?: string;
+  permissions?: Permission[];
 
   // UTM defaults for campaign tracking
   utm_source: string;

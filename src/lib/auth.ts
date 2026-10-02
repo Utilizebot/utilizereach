@@ -54,6 +54,60 @@ export function authHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+/**
+ * Install a one-time global fetch interceptor.
+ *
+ * The app's pages call fetch() directly (not a shared client), so rather than
+ * wire the Authorization header into dozens of call sites, we attach the stored
+ * JWT to every same-app `/api` request here. Public endpoints (login, tracking,
+ * unsubscribe) simply ignore the header, so adding it unconditionally is safe.
+ *
+ * It also centralises session expiry: a 401 from an API call clears the token
+ * and bounces to /login. (403 = permission denied is left for the page to show.)
+ */
+export function installAuthFetch(): void {
+  const w = window as unknown as { __authFetchInstalled?: boolean };
+  if (w.__authFetchInstalled) return;
+  w.__authFetchInstalled = true;
+
+  const orig = window.fetch.bind(window);
+  window.fetch = async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
+    let isApi = false;
+    try {
+      const url =
+        typeof input === 'string' ? input
+          : input instanceof URL ? input.href
+            : input instanceof Request ? input.url
+              : String(input);
+      isApi = url.includes('/api/');
+      const token = getStoredToken();
+      if (isApi && token) {
+        const headers = new Headers(
+          init.headers ?? (input instanceof Request ? input.headers : undefined)
+        );
+        if (!headers.has('Authorization')) {
+          headers.set('Authorization', `Bearer ${token}`);
+          init = { ...init, headers };
+        }
+      }
+    } catch {
+      /* fall through to a plain fetch */
+    }
+
+    const res = await orig(input as RequestInfo | URL, init);
+
+    try {
+      if (isApi && res.status === 401 && window.location.pathname !== '/login') {
+        clearStoredToken();
+        window.location.assign('/login');
+      }
+    } catch {
+      /* ignore */
+    }
+    return res;
+  };
+}
+
 async function parseError(response: Response): Promise<Error> {
   const body = await response.json().catch(() => ({ detail: response.statusText }));
   return new Error(body.detail || `Request failed: ${response.status}`);

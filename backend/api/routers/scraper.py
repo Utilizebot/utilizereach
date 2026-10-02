@@ -20,7 +20,7 @@ from api.models import (
     JobListResponse,
     LeadResult,
 )
-from api.dependencies import get_current_user
+from api.dependencies import get_current_user, require_permission
 from database.operations import (
     create_scraping_job,
     get_jobs_by_user,
@@ -37,7 +37,7 @@ router = APIRouter(prefix="/api/scraper", tags=["scraper"])
 @router.post("/start-job", response_model=StartJobResponse)
 async def start_scraping_job(
     request: StartScrapingJobRequest,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(require_permission("scraper.run"))
 ):
     """
     Start a new lead scraping job

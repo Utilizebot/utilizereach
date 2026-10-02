@@ -9,7 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Role-based access control (RBAC) with four roles — **Admin**, **Manager**, **Member**, **Viewer** — and a central permission matrix (`backend/api/permissions.py`) that is the single source of truth for both backend and frontend. Admins manage the team and roles from Settings → Users.
+- Blanket authentication on all management API routers, with per-action permission checks (`require_permission`) on every create/edit/delete/manage endpoint. Public endpoints (tracking pixel, unsubscribe, lead-capture, login, Google OAuth callback) remain open by design.
+- `GET /api/auth/roles` returns the role catalog (labels, descriptions, permissions) for role pickers; `/api/auth/me` now includes the signed-in user's resolved `permissions` list.
+
 ### Changed
+
+- Deactivated accounts are now rejected at login and on every authenticated request (previously a deactivated user could keep using an existing token).
+- The frontend attaches the auth token to all API requests automatically and redirects to login on session expiry.
 
 ### Fixed
 
