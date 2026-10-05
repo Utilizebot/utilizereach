@@ -894,66 +894,8 @@ CREATE TRIGGER trigger_update_campaign_stats
 -- 15. Analytics view (005 definition)
 -- ----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW analytics_overview AS
-SELECT
-    -- Session info
-    fs.session_id,
-    fs.created_at as session_created_at,
-    fs.completed_at,
-    fs.status,
-
-    -- UTM parameters
-    fs.utm_source,
-    fs.utm_medium,
-    fs.utm_campaign,
-    fs.utm_content,
-
-    -- Sales attribution
-    fs.sales_rep_name,
-    fs.sales_rep_id,
-
-    -- Device & browser info
-    fs.device_type,
-    fs.browser,
-    fs.os,
-    fs.screen_resolution,
-    fs.viewport_size,
-
-    -- Location & preferences
-    fs.timezone,
-    fs.language,
-    fs.country,
-
-    -- Technical details
-    fs.user_agent,
-    fs.referrer,
-    fs.landing_page,
-    fs.metadata,
-
-    -- Form response data
-    fr.id as response_id,
-    fr.created_at,
-    fr.industry,
-    fr.challenge,
-    fr.automation_level,
-    fr.facility_size,
-    fr.solutions_interest,
-    fr.timeline,
-    fr.full_name,
-    fr.organization,
-    fr.email,
-    fr.phone,
-    fr.contact_method,
-    fr.notes,
-    fr.lead_score,
-
-    -- Calculated fields
-    EXTRACT(EPOCH FROM (COALESCE(fs.completed_at, NOW()) - fs.created_at)) as session_duration_seconds,
-    (SELECT COUNT(*) FROM tracking_events WHERE session_id = fs.session_id) as total_events,
-    (SELECT MAX(step_number) FROM form_steps WHERE session_id = fs.session_id) as max_step_reached
-
-FROM form_sessions fs
-LEFT JOIN form_responses fr ON fs.session_id = fr.session_id;
+-- analytics_overview is defined in multibrand.sql (it carries brand_id and runs
+-- with security_invoker so row-level security applies through it).
 
 
 -- ============================================================================
@@ -983,7 +925,7 @@ CREATE INDEX IF NOT EXISTS idx_scraped_leads_segment ON scraped_leads(segment);
 INSERT INTO segments (key, label, description, color, sort_order) VALUES
   ('shareholders', 'Shareholders', 'Demo investor register — individual and nominee shareholders', '#8b5cf6', 10),
   ('government',   'Government',    'Malaysian government agencies and ministries',                    '#0ea5e9', 20)
-ON CONFLICT (key) DO NOTHING;
+ON CONFLICT DO NOTHING;
 
 -- Backfill existing leads from their import search_query tag. Only touches
 -- rows that are not yet segmented, so it is a no-op after the first run.
@@ -1009,3 +951,11 @@ CREATE INDEX IF NOT EXISTS idx_sent_emails_variant ON sent_emails(campaign_id, v
 -- Follow-up sequence steps per campaign: [{after_days, subject, body}, ...]
 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS followups JSONB DEFAULT '[]'::jsonb;
 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS followup_engaged_only BOOLEAN DEFAULT false;
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS ai_brief TEXT;
+
+-- Attribution: lead owner (who contributed the lead) + account manager (who runs the outreach)
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS account_manager TEXT;
+ALTER TABLE scraped_leads ADD COLUMN IF NOT EXISTS owner TEXT;
+ALTER TABLE scraped_leads ADD COLUMN IF NOT EXISTS account_manager TEXT;
+ALTER TABLE sent_emails ADD COLUMN IF NOT EXISTS owner TEXT;
+ALTER TABLE sent_emails ADD COLUMN IF NOT EXISTS account_manager TEXT;

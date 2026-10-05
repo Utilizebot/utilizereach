@@ -1,15 +1,19 @@
 """
 Email Exclusions Router
 Manage emails that should be excluded from campaigns
+
+Multi-brand: exclusions are per brand (unique (brand_id, email)). Every
+endpoint runs inside an authenticated request whose brand is bound by
+api.dependencies.get_current_user, and all access goes through the query
+builder, which scopes reads/deletes to that brand and stamps inserts with it.
 """
 
 from fastapi import APIRouter, HTTPException, Depends
-
-from api.dependencies import require_permission
 from pydantic import BaseModel, EmailStr
 from typing import List, Optional
 
 from database.client import get_supabase_admin_client
+from api.dependencies import require_permission
 
 router = APIRouter(prefix="/api/exclusions", tags=["Exclusions"])
 
@@ -124,7 +128,11 @@ async def remove_exclusion(exclusion_id: str, _perm: dict = Depends(require_perm
 
 
 @router.post("/bulk")
-async def add_bulk_exclusions(emails: List[str], reason: Optional[str] = None, _perm: dict = Depends(require_permission("exclusions.manage"))):
+async def add_bulk_exclusions(
+    emails: List[str],
+    reason: Optional[str] = None,
+    _perm: dict = Depends(require_permission("exclusions.manage")),
+):
     """
     Add multiple emails to exclusion list at once
 

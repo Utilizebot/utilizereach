@@ -31,6 +31,7 @@ cd utilizereach
 # 2. Create your environment file from the template
 cp .env.example .env
 #    Then open .env and fill in the values (JWT secret, DB creds, LLM API keys, etc.)
+#    and set APP_DB_PASSWORD so the app runs as the row-level-security app_rw role
 
 # 3. Build and start the full stack
 docker compose up -d --build
@@ -61,7 +62,7 @@ utilizereach/
 ├── src/            React 19 + TypeScript + Vite + Tailwind frontend
 ├── ops/            Operational scripts — cron jobs (paced sender,
 │                   warm-up ramp, follow-ups, maintenance)
-├── docs/           Documentation, including EMAIL_SETUP.md
+├── docs/           Documentation, including EMAIL_SETUP.md and MULTIBRAND.md
 └── docker-compose.yml
 ```
 
@@ -81,7 +82,16 @@ Run these locally before opening a PR so CI passes on the first try.
 cd backend
 ruff check .            # lint
 ruff format --check .   # formatting
-pytest                  # tests
+pytest --ignore=tests/multibrand   # unit tests (excludes the live isolation suite)
+```
+
+**Multi-brand isolation suite.** `backend/tests/multibrand/` attacks a *live*
+backend and writes fixtures, so it is not part of a plain `pytest` run. If your
+change touches tenant data (routers, Celery tasks, `ops/` scripts, SQL), run it
+against a disposable local stack:
+
+```bash
+backend/tests/multibrand/run.sh      # see backend/tests/multibrand/README.md
 ```
 
 **Frontend (React/TypeScript):**
@@ -93,6 +103,20 @@ npm run build           # type-check + production build
 ```
 
 If you added a dependency, commit the updated lockfile (`requirements.txt` / `package-lock.json`) alongside your change.
+
+---
+
+## Multi-brand rules
+
+Every deployment can host several isolated brands. Backend code that reads or
+writes brand data must follow the rules in
+**[docs/MULTIBRAND.md → Backend rules](docs/MULTIBRAND.md#backend-rules-every-router--task--script-must-follow)** —
+in short: raw SQL on tenant tables filters by `brand_id`, Celery tasks take a
+`brand_id` and run inside `brand_scope()`, no module-level caches of tenant
+data, no runtime DDL, and no hard-coded brand values (CTA, domains, senders).
+A new tenant table needs a `brand_id` column, an entry in
+`database/tenancy.py: TENANT_TABLES`, and an entry in the `tenant_tables`
+lists in `database/multibrand.sql` (which adds the RLS policy).
 
 ---
 

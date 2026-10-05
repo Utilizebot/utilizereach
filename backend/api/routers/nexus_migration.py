@@ -1,7 +1,7 @@
 """
 Nexus Marketing Engine — Legacy Data Ingestion Router
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
 from typing import Optional, Any
 import re
@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from database.pg import execute_sql
+from database import tenancy
+from api.dependencies import require_permission
 
 router = APIRouter(prefix="/api/v1/migration", tags=["Nexus Migration"])
 
@@ -46,10 +48,11 @@ class BatchStatusResponse(BaseModel):
     classifications: dict[str, int]
 
 @router.post("/ingest-legacy", response_model=BatchStatusResponse)
-def ingest_legacy(req: IngestRequest):
+def ingest_legacy(req: IngestRequest, _perm: dict = Depends(require_permission("leads.import"))):
     if len(req.contacts) > 5000:
         raise HTTPException(422, f"Batch exceeds maximum of 5,000 records (got {len(req.contacts)})")
 
+    brand_id = tenancy.require_brand()
     batch_id = str(uuid.uuid4())
     valid, invalid = 0, 0
     classifications: dict[str, int] = {"SHAREHOLDER": 0, "BUSINESS_PARTNER": 0, "GOVT_AGENCY": 0, "UNASSIGNED": 0}
@@ -65,8 +68,8 @@ def ingest_legacy(req: IngestRequest):
         raw["_source"] = req.source_system
         try:
             execute_sql(
-                "INSERT INTO staging_legacy_contacts (raw_data, migration_status, assigned_segment) VALUES (%s::jsonb, %s, %s::stakeholder_type)",
-                [__import__("json").dumps(raw), "PENDING", segment]
+                "INSERT INTO staging_legacy_contacts (brand_id, raw_data, migration_status, assigned_segment) VALUES (%s, %s::jsonb, %s, %s::stakeholder_type)",
+                [brand_id, __import__("json").dumps(raw), "PENDING", segment]
             )
             valid += 1
         except Exception:
@@ -77,16 +80,25 @@ def ingest_legacy(req: IngestRequest):
 @router.get("/status/{batch_id}")
 def get_batch_status(batch_id: str):
     rows = execute_sql(
-        "SELECT migration_status, COUNT(*) as cnt FROM staging_legacy_contacts WHERE raw_data->>'_batch_id' = %s GROUP BY migration_status",
-        [batch_id]
+        "SELECT migration_status, COUNT(*) as cnt FROM staging_legacy_contacts WHERE brand_id = %s AND raw_data->>'_batch_id' = %s GROUP BY migration_status",
+        [tenancy.require_brand(), batch_id]
     )
     return {"batch_id": batch_id, "breakdown": rows}
 
 @router.post("/promote/{batch_id}")
-def promote_batch(batch_id: str):
+def promote_batch(batch_id: str, _perm: dict = Depends(require_permission("leads.import"))):
+    brand_id = tenancy.require_brand()
+    # Honest 404: a batch with no staging rows in the ACTIVE brand (unknown id,
+    # or another brand's batch) must not answer 200. Brand-scoped check only.
+    exists = execute_sql(
+        "SELECT 1 FROM staging_legacy_contacts WHERE brand_id = %s AND raw_data->>'_batch_id' = %s LIMIT 1",
+        [brand_id, batch_id]
+    )
+    if not exists:
+        raise HTTPException(404, "Batch not found")
     pending = execute_sql(
-        "SELECT raw_id, raw_data, assigned_segment FROM staging_legacy_contacts WHERE raw_data->>'_batch_id' = %s AND migration_status = 'PENDING'",
-        [batch_id]
+        "SELECT raw_id, raw_data, assigned_segment FROM staging_legacy_contacts WHERE brand_id = %s AND raw_data->>'_batch_id' = %s AND migration_status = 'PENDING'",
+        [brand_id, batch_id]
     )
     promoted, skipped = 0, 0
     for row in pending:
@@ -97,12 +109,12 @@ def promote_batch(batch_id: str):
             continue
         try:
             execute_sql(
-                """INSERT INTO stakeholders (segment_type, organization_name, primary_contact_name, email_address, phone_number, legacy_id_ref)
-                   VALUES (%s::stakeholder_type, %s, %s, %s, %s, %s)
-                   ON CONFLICT (email_address) DO NOTHING""",
-                [row["assigned_segment"], raw.get("organization") or raw.get("company"), raw.get("name") or raw.get("contact_name"), email, raw.get("phone"), str(row["raw_id"])]
+                """INSERT INTO stakeholders (brand_id, segment_type, organization_name, primary_contact_name, email_address, phone_number, legacy_id_ref)
+                   VALUES (%s, %s::stakeholder_type, %s, %s, %s, %s, %s)
+                   ON CONFLICT (brand_id, email_address) DO NOTHING""",
+                [brand_id, row["assigned_segment"], raw.get("organization") or raw.get("company"), raw.get("name") or raw.get("contact_name"), email, raw.get("phone"), str(row["raw_id"])]
             )
-            execute_sql("UPDATE staging_legacy_contacts SET migration_status='PROMOTED', processed_at=NOW() WHERE raw_id=%s", [row["raw_id"]])
+            execute_sql("UPDATE staging_legacy_contacts SET migration_status='PROMOTED', processed_at=NOW() WHERE raw_id=%s AND brand_id=%s", [row["raw_id"], brand_id])
             promoted += 1
         except Exception:
             skipped += 1

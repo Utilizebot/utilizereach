@@ -1,6 +1,6 @@
 # ============================================
 # UTILIZEREACH - Docker Compose stack
-# AI lead generation, scraping & email outreach platform (LeadAutomation)
+# AI lead generation, scraping & email outreach platform (UtilizeReach)
 # Usage: docker compose up -d --build
 # ============================================
 
@@ -60,6 +60,9 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - DATABASE_URL=postgresql://${POSTGRES_USER:-marketing}:${POSTGRES_PASSWORD:-marketing}@postgres:5432/${POSTGRES_DB:-marketing_ai}
+      # multi-brand: app connects as least-privilege role app_rw (row-level security) when set
+      - APP_DB_PASSWORD=${APP_DB_PASSWORD:-}
+      - TENANCY_APP_ROLE=${TENANCY_APP_ROLE:-on}
       - JWT_SECRET=${JWT_SECRET:-}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
@@ -103,6 +106,9 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - DATABASE_URL=postgresql://${POSTGRES_USER:-marketing}:${POSTGRES_PASSWORD:-marketing}@postgres:5432/${POSTGRES_DB:-marketing_ai}
+      # multi-brand: app connects as least-privilege role app_rw (row-level security) when set
+      - APP_DB_PASSWORD=${APP_DB_PASSWORD:-}
+      - TENANCY_APP_ROLE=${TENANCY_APP_ROLE:-on}
       - JWT_SECRET=${JWT_SECRET:-}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
@@ -138,6 +144,9 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - DATABASE_URL=postgresql://${POSTGRES_USER:-marketing}:${POSTGRES_PASSWORD:-marketing}@postgres:5432/${POSTGRES_DB:-marketing_ai}
+      # multi-brand: app connects as least-privilege role app_rw (row-level security) when set
+      - APP_DB_PASSWORD=${APP_DB_PASSWORD:-}
+      - TENANCY_APP_ROLE=${TENANCY_APP_ROLE:-on}
       - JWT_SECRET=${JWT_SECRET:-}
     volumes:
       - ./backend/.gmail_tokens:/app/.gmail_tokens:ro

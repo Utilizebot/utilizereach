@@ -44,10 +44,12 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,  # Process one task at a time
     worker_max_tasks_per_child=50,  # Restart worker after 50 tasks (prevent memory leaks)
 
-    # Beat schedule for automated daily campaigns
+    # Beat schedule for automated daily campaigns. Multi-brand: the beat job
+    # fans out one send_daily_campaign(brand_id=...) per active brand; each
+    # brand's own scheduler_settings decide whether it actually sends.
     beat_schedule={
         'send-daily-campaign-10am': {
-            'task': 'celery_app.tasks.send_daily_campaign',
+            'task': 'celery_app.tasks.send_daily_campaign_all_brands',
             'schedule': crontab(hour=10, minute=0),  # 10:00 AM Malaysia time
             'options': {'expires': 3600}  # Task expires after 1 hour if not picked up
         },

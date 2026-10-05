@@ -15,6 +15,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 from api.dependencies import get_current_user
 from database.client import get_supabase_client
 from database.pg import execute_sql
+from database import tenancy
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 
@@ -40,11 +41,12 @@ async def analytics_overview(current_user: dict = Depends(get_current_user)):
             .execute()
         ).data
 
+        # raw SQL: scope to the active brand explicitly (view exposes brand_id)
         responses = execute_sql(
             "SELECT * FROM analytics_overview "
-            "WHERE response_id IS NOT NULL "
+            "WHERE brand_id = %s AND response_id IS NOT NULL "
             "ORDER BY created_at DESC LIMIT %s",
-            [MAX_ROWS],
+            [tenancy.require_brand(), MAX_ROWS],
         )
 
         steps = (

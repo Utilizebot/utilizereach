@@ -22,6 +22,14 @@ Supported surface:
 
 Rows are JSON-safe: datetime/date -> ISO strings, UUID -> str,
 Decimal -> float, matching what PostgREST/Supabase used to return.
+
+Multi-brand tenancy (see database/tenancy.py and database/multibrand.sql):
+every statement runs in its own transaction that first binds the active brand
+(app.brand_id) and the bypass flag (app.tenancy_bypass), so row-level security
+and the brand_id column default always see the right brand on the SAME
+connection as the query. Query-builder calls on tenant tables are auto-scoped
+to the active brand, and touching a tenant table with no active brand raises
+TenancyError (fail closed).
 """
 
 import os
@@ -39,6 +47,8 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from database import tenancy
+
 # Load environment the same way the old client did (Docker config volume first)
 _config_env = Path("/app/config/.env")
 if _config_env.exists():
@@ -52,7 +62,8 @@ _pool: Optional[ConnectionPool] = None
 _pool_lock = threading.Lock()
 
 
-def get_database_url() -> str:
+def get_owner_database_url() -> str:
+    """Connection string for the schema OWNER (migrations / DDL only)."""
     url = os.getenv("DATABASE_URL", "")
     if not url:
         host = os.getenv("POSTGRES_HOST", "localhost")
@@ -62,6 +73,66 @@ def get_database_url() -> str:
         db = os.getenv("POSTGRES_DB", "marketing_ai")
         url = f"postgresql://{user}:{password}@{host}:{port}/{db}"
     return url
+
+
+def get_database_url() -> str:
+    """Connection string for the APPLICATION pool.
+
+    The app connects as the least-privilege role app_rw (subject to row-level
+    security) when either APP_DATABASE_URL is set, or APP_DB_PASSWORD is set
+    (the URL is then derived from DATABASE_URL with user app_rw). Otherwise,
+    or when TENANCY_APP_ROLE=off (emergency switch), it uses the owner
+    DATABASE_URL - the app-layer scoping still applies, RLS does not.
+    """
+    owner = get_owner_database_url()
+    if os.getenv("TENANCY_APP_ROLE", "on").strip().lower() == "off":
+        return owner
+    explicit = os.getenv("APP_DATABASE_URL", "").strip()
+    if explicit:
+        return explicit
+    password = os.getenv("APP_DB_PASSWORD", "").strip()
+    if password:
+        from urllib.parse import quote, urlsplit, urlunsplit
+        parts = urlsplit(owner)
+        host = parts.hostname or "localhost"
+        netloc = f"app_rw:{quote(password, safe='')}@{host}" + (f":{parts.port}" if parts.port else "")
+        return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+    return owner
+
+
+# ---------------------------------------------------------------------------
+# Tenancy binding
+# ---------------------------------------------------------------------------
+
+_TENANT_RE = re.compile(
+    r"\b(" + "|".join(sorted(tenancy.TENANT_TABLES, key=len, reverse=True)) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def _bind_tenancy(cur) -> None:
+    """Bind the active brand + bypass flag to THIS transaction (is_local=true).
+
+    Must run on the same cursor/transaction as the statement it protects.
+    """
+    brand = tenancy.current_brand() or ""
+    bypass = "on" if tenancy.in_system_scope() else "off"
+    cur.execute(
+        "SELECT set_config('app.brand_id', %s, true), set_config('app.tenancy_bypass', %s, true)",
+        [brand, bypass],
+    )
+
+
+def _guard_raw_sql(sql: str) -> None:
+    """Fail closed when raw SQL touches a tenant table with no active brand."""
+    if tenancy.in_system_scope() or tenancy.current_brand():
+        return
+    m = _TENANT_RE.search(sql)
+    if m:
+        raise tenancy.TenancyError(
+            f"Query touches tenant table {m.group(1)!r} with no active brand "
+            f"(wrap it in brand_scope() / run it inside an authenticated request)"
+        )
 
 
 def is_database_configured() -> bool:
@@ -399,13 +470,51 @@ class QueryBuilder:
 
         raise ValueError(f"Unknown operation {self._op!r}")
 
+    # ---------- tenancy ----------
+
+    def _apply_tenancy(self) -> None:
+        """Scope this builder to the active brand when it targets a tenant table.
+
+        reads / updates / deletes get `brand_id = <active brand>` ANDed in, so a
+        by-id lookup of another brand's row simply finds nothing; inserts and
+        upserts are stamped with the active brand, and an explicit brand_id that
+        differs from it is rejected. No active brand -> TenancyError.
+        System scope is trusted: no automatic filter, rows must carry brand_id.
+        """
+        if self._table not in tenancy.TENANT_TABLES or tenancy.in_system_scope():
+            return
+        brand = tenancy.current_brand()
+        if not brand:
+            raise tenancy.TenancyError(
+                f"{self._op} on tenant table {self._table!r} with no active brand"
+            )
+        if self._op in ("insert", "upsert"):
+            rows = self._payload if isinstance(self._payload, list) else [self._payload]
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                given = row.get("brand_id")
+                if given and str(given) != brand:
+                    raise tenancy.TenancyError(
+                        f"Refusing to write {self._table!r} row for brand {given} while acting as {brand}"
+                    )
+                row["brand_id"] = brand
+            return
+        if self._op == "update" and isinstance(self._payload, dict):
+            given = self._payload.get("brand_id")
+            if given and str(given) != brand:
+                raise tenancy.TenancyError(f"Refusing to move {self._table!r} rows to another brand")
+        self._filters.append(("brand_id", "=", brand))
+
     # ---------- execution ----------
 
     def execute(self) -> APIResponse:
+        self._apply_tenancy()
         sql, params, count_query = self._build()
         pool = get_pool()
         with pool.connection() as conn:
             with conn.cursor() as cur:
+                _bind_tenancy(cur)
                 cur.execute(sql, params)
                 rows = cur.fetchall() if cur.description else []
                 count = None
@@ -450,6 +559,7 @@ class RpcBuilder:
         pool = get_pool()
         with pool.connection() as conn:
             with conn.cursor() as cur:
+                _bind_tenancy(cur)
                 cur.execute(sql, values)
                 rows = cur.fetchall() if cur.description else []
         data = [_jsonify(dict(r)) for r in rows]
@@ -483,10 +593,19 @@ def get_client() -> PostgresClient:
 
 
 def execute_sql(sql: str, params: Optional[List[Any]] = None) -> List[Dict[str, Any]]:
-    """Escape hatch for raw SQL (used by auth, analytics endpoints, migrations)."""
+    """Escape hatch for raw SQL (used by auth, analytics endpoints, the sender).
+
+    Raw SQL is NOT rewritten: queries on tenant tables must filter by brand_id
+    themselves (pass tenancy.require_brand() as a parameter). As a backstop the
+    active brand is bound to the transaction, so row-level security scopes the
+    query when the app connects as app_rw, and a tenant-table query with no
+    active brand fails closed.
+    """
+    _guard_raw_sql(sql)
     pool = get_pool()
     with pool.connection() as conn:
         with conn.cursor() as cur:
+            _bind_tenancy(cur)
             cur.execute(sql, params or [])
             rows = cur.fetchall() if cur.description else []
     return [_jsonify(dict(r)) for r in rows]

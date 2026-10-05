@@ -9,14 +9,15 @@ Routes use explicit sub-paths (/list, /create, /detail/{id}) so they never
 clash with the existing campaigns router (/start, /status).
 """
 import re
+import uuid
 from typing import Optional, List
 from fastapi import APIRouter, HTTPException, Depends
-
-from api.dependencies import require_permission
 from pydantic import BaseModel
 
 from database.client import get_supabase_admin_client
 from database.pg import execute_sql
+from database import tenancy
+from api.dependencies import require_permission
 
 router = APIRouter(prefix="/api/campaigns", tags=["campaigns-mgmt"])
 
@@ -42,12 +43,32 @@ class CampaignCreate(BaseModel):
     variants: List[Variant] = []
     followups: List[Followup] = []
     followup_engaged_only: bool = False  # only follow up with contacts who opened/clicked
+    account_manager: Optional[str] = None  # who runs this campaign's outreach (attribution)
+    email_account_id: Optional[str] = None  # sending mailbox; must belong to the active brand
     status: str = "active"              # active | draft | paused
 
 
 class FollowupUpdate(BaseModel):
     followups: List[Followup] = []
     followup_engaged_only: bool = False
+    account_manager: Optional[str] = None
+
+
+def _check_email_account(email_account_id: Optional[str]) -> None:
+    """A campaign's mailbox must exist in the ACTIVE brand: clear 400 instead of
+    a raw composite-FK error (fk_campaigns_account_brand)."""
+    if not email_account_id:
+        return
+    try:
+        uuid.UUID(str(email_account_id))
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="email_account_id is not a valid id")
+    sb = get_supabase_admin_client()
+    # query builder on a tenant table: auto-scoped to the active brand
+    res = sb.table("email_accounts").select("id").eq("id", str(email_account_id)).limit(1).execute()
+    if not res.data:
+        raise HTTPException(status_code=400,
+                            detail="email_account_id does not belong to this brand (unknown mailbox)")
 
 
 def _stats_row(cid: str) -> dict:
@@ -55,7 +76,7 @@ def _stats_row(cid: str) -> dict:
         "SELECT count(*) sent, "
         "count(opened_at) opened, count(clicked_at) clicked, count(replied_at) replied, "
         "count(bounced_at) bounced "
-        "FROM sent_emails WHERE campaign_id = %s", [cid])
+        "FROM sent_emails WHERE campaign_id = %s AND brand_id = %s", [cid, tenancy.require_brand()])
     r = rows[0] if rows else {}
     sent = r.get("sent", 0) or 0
     def pct(n): return round((n or 0) / sent * 100, 1) if sent else 0.0
@@ -84,6 +105,7 @@ async def list_campaigns():
                 "variant_count": len(c.get("variants") or []),
                 "followup_count": len(c.get("followups") or []),
                 "followup_engaged_only": bool(c.get("followup_engaged_only")),
+                "account_manager": c.get("account_manager") or c.get("created_by"),
                 "created_at": c.get("created_at"),
                 "progress": round(s["sent"] / target * 100, 1) if target else 0.0,
                 **s,
@@ -103,11 +125,13 @@ async def campaign_detail(cid: str):
             raise HTTPException(status_code=404, detail="Campaign not found")
         c = res.data[0]
 
+        b = tenancy.require_brand()
+
         # per-variant A/B
         vrows = execute_sql(
             "SELECT COALESCE(variant,'(none)') variant, count(*) sent, "
             "count(opened_at) opened, count(clicked_at) clicked, count(replied_at) replied "
-            "FROM sent_emails WHERE campaign_id=%s GROUP BY 1 ORDER BY 1", [cid])
+            "FROM sent_emails WHERE campaign_id=%s AND brand_id=%s GROUP BY 1 ORDER BY 1", [cid, b])
         def pct(n, d): return round((n or 0) / d * 100, 1) if d else 0.0
         variants_stats = [{
             "variant": r["variant"], "sent": r["sent"], "opened": r["opened"],
@@ -119,7 +143,7 @@ async def campaign_detail(cid: str):
         # per-persona
         prows = execute_sql(
             "SELECT from_email, count(*) sent, count(opened_at) opened, count(replied_at) replied "
-            "FROM sent_emails WHERE campaign_id=%s GROUP BY 1 ORDER BY 2 DESC", [cid])
+            "FROM sent_emails WHERE campaign_id=%s AND brand_id=%s GROUP BY 1 ORDER BY 2 DESC", [cid, b])
         personas = [{
             "from_email": r["from_email"], "sent": r["sent"], "opened": r["opened"],
             "replied": r["replied"], "open_rate": pct(r["opened"], r["sent"]),
@@ -129,10 +153,11 @@ async def campaign_detail(cid: str):
         recent = execute_sql(
             "SELECT id, recipient_name, recipient_email, from_email, subject, variant, status, "
             "sent_at, opened_at, clicked_at, replied_at FROM sent_emails "
-            "WHERE campaign_id=%s ORDER BY sent_at DESC LIMIT 50", [cid])
+            "WHERE campaign_id=%s AND brand_id=%s ORDER BY sent_at DESC LIMIT 50", [cid, b])
 
         # follow-up sends (variant starts with 'F')
-        fu = execute_sql("SELECT count(*) n FROM sent_emails WHERE campaign_id=%s AND variant LIKE 'F%%'", [cid])
+        fu = execute_sql("SELECT count(*) n FROM sent_emails WHERE campaign_id=%s AND brand_id=%s "
+                         "AND variant LIKE 'F%%'", [cid, b])
         followup_sent = (fu[0]["n"] if fu else 0) or 0
 
         return {
@@ -142,6 +167,7 @@ async def campaign_detail(cid: str):
                 "target_count": c.get("target_count"), "daily_cap": c.get("daily_cap"),
                 "variants": c.get("variants") or [], "followups": c.get("followups") or [],
                 "followup_engaged_only": bool(c.get("followup_engaged_only")),
+                "account_manager": c.get("account_manager") or c.get("created_by"),
                 "created_at": c.get("created_at"),
             },
             "stats": _stats_row(cid),
@@ -157,8 +183,10 @@ async def campaign_detail(cid: str):
 
 
 @router.post("/create")
-async def create_campaign(payload: CampaignCreate, _perm: dict = Depends(require_permission("campaigns.create"))):
+async def create_campaign(payload: CampaignCreate,
+                          _perm: dict = Depends(require_permission("campaigns.create"))):
     try:
+        _check_email_account(payload.email_account_id)
         sb = get_supabase_admin_client()
         # normalize variant labels A, B, C...
         variants = []
@@ -173,17 +201,22 @@ async def create_campaign(payload: CampaignCreate, _perm: dict = Depends(require
             "variants": variants,
             "followups": [f.dict() for f in payload.followups],
             "followup_engaged_only": payload.followup_engaged_only,
+            "account_manager": payload.account_manager,
+            "email_account_id": payload.email_account_id,
             "status": payload.status,
         }
         row = {k: v for k, v in row.items() if v is not None}
         created = sb.table("campaigns").insert(row).execute()
         return {"success": True, "campaign": created.data[0]}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create campaign: {e}")
 
 
 @router.post("/{cid}/set-status")
-async def set_status(cid: str, body: dict, _perm: dict = Depends(require_permission("campaigns.edit"))):
+async def set_status(cid: str, body: dict,
+                     _perm: dict = Depends(require_permission("campaigns.edit"))):
     status = (body or {}).get("status")
     if status not in ("active", "paused", "draft", "completed"):
         raise HTTPException(status_code=400, detail="Invalid status")
@@ -200,14 +233,18 @@ async def set_status(cid: str, body: dict, _perm: dict = Depends(require_permiss
 
 
 @router.post("/{cid}/update-followups")
-async def update_followups(cid: str, payload: FollowupUpdate, _perm: dict = Depends(require_permission("campaigns.edit"))):
+async def update_followups(cid: str, payload: FollowupUpdate,
+                           _perm: dict = Depends(require_permission("campaigns.edit"))):
     """Edit a live campaign's follow-up sequence + engagement gate from the UI."""
     try:
         sb = get_supabase_admin_client()
-        res = sb.table("campaigns").update({
+        upd = {
             "followups": [f.dict() for f in payload.followups],
             "followup_engaged_only": payload.followup_engaged_only,
-        }).eq("id", cid).execute()
+        }
+        if payload.account_manager is not None:
+            upd["account_manager"] = payload.account_manager
+        res = sb.table("campaigns").update(upd).eq("id", cid).execute()
         if not res.data:
             raise HTTPException(status_code=404, detail="Campaign not found")
         return {"success": True, "campaign": res.data[0]}
@@ -218,12 +255,21 @@ async def update_followups(cid: str, payload: FollowupUpdate, _perm: dict = Depe
 
 
 @router.delete("/remove/{cid}")
-async def remove_campaign(cid: str, _perm: dict = Depends(require_permission("campaigns.delete"))):
+async def remove_campaign(cid: str,
+                          _perm: dict = Depends(require_permission("campaigns.delete"))):
     try:
         sb = get_supabase_admin_client()
+        b = tenancy.require_brand()
+        # only this brand's campaign: the auto-scoped lookup finds nothing for
+        # another brand's id (-> 404), so its sends are never touched
+        found = sb.table("campaigns").select("id").eq("id", cid).limit(1).execute()
+        if not found.data:
+            raise HTTPException(status_code=404, detail="Campaign not found")
         # detach sends (keep them, just clear the link)
-        execute_sql("UPDATE sent_emails SET campaign_id=NULL WHERE campaign_id=%s", [cid])
+        execute_sql("UPDATE sent_emails SET campaign_id=NULL WHERE campaign_id=%s AND brand_id=%s", [cid, b])
         sb.table("campaigns").delete().eq("id", cid).execute()
         return {"success": True}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete campaign: {e}")

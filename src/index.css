@@ -2,6 +2,47 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  /* Brand colour scales as space-separated RGB triplets. tailwind.config.js
+     reads them as rgb(var(--brand-600) / <alpha-value>) so `brand-*`,
+     `blue-*`, `indigo-*`, `primary` and `accent` can be re-themed per brand at
+     runtime (src/lib/config.ts applyBrandTheme, driven by ConfigContext from
+     the active brand's branding.primaryColor). These DEFAULTS are exactly the
+     stock UtilizeReach palette (Tailwind blue / indigo, primary #0066CC,
+     accent #00A8FF), so a brand without a custom colour renders unchanged.
+     Do not edit them to re-brand one tenant - set branding.primaryColor on
+     that brand instead. */
+  --brand-50: 239 246 255; /* #eff6ff */
+  --brand-100: 219 234 254; /* #dbeafe */
+  --brand-200: 191 219 254; /* #bfdbfe */
+  --brand-300: 147 197 253; /* #93c5fd */
+  --brand-400: 96 165 250; /* #60a5fa */
+  --brand-500: 59 130 246; /* #3b82f6 */
+  --brand-600: 37 99 235; /* #2563eb */
+  --brand-700: 29 78 216; /* #1d4ed8 */
+  --brand-800: 30 64 175; /* #1e40af */
+  --brand-900: 30 58 138; /* #1e3a8a */
+  --brand-950: 23 37 84; /* #172554 */
+  --brand-deep-50: 238 242 255; /* #eef2ff */
+  --brand-deep-100: 224 231 255; /* #e0e7ff */
+  --brand-deep-200: 199 210 254; /* #c7d2fe */
+  --brand-deep-300: 165 180 252; /* #a5b4fc */
+  --brand-deep-400: 129 140 248; /* #818cf8 */
+  --brand-deep-500: 99 102 241; /* #6366f1 */
+  --brand-deep-600: 79 70 229; /* #4f46e5 */
+  --brand-deep-700: 67 56 202; /* #4338ca */
+  --brand-deep-800: 55 48 163; /* #3730a3 */
+  --brand-deep-900: 49 46 129; /* #312e81 */
+  --brand-deep-950: 30 27 75; /* #1e1b4b */
+
+  /* Single-colour roles */
+  --brand-primary: 0 102 204;       /* #0066CC */
+  --brand-primary-dark: 0 82 163;   /* #0052A3 */
+  --brand-primary-light: 51 133 214;/* #3385D6 */
+  --brand-accent: 0 168 255;        /* #00A8FF */
+  --brand-accent-light: 51 186 255; /* #33BAFF */
+}
+
 @layer base {
   * {
     @apply box-border;

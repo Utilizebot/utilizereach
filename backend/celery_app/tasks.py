@@ -1,18 +1,31 @@
 """
 Celery Tasks
 
-Background tasks for lead scraping
+Background tasks for lead scraping and scheduled / single email sends.
+
+Multi-brand: a task runs OUTSIDE any HTTP request, so it sets its brand
+deliberately. Every task that touches tenant data takes a `brand_id` kwarg
+(callers enqueue with brand_id=tenancy.require_brand()) and runs its whole
+body inside brand_scope(brand_id). Messages queued before the multi-brand
+release carry no brand_id: they run as the brand that owns the row they work
+on (scraping job / lead) or brand 1, with a warning.
+
+The beat job (send_daily_campaign_all_brands) fans out one
+send_daily_campaign(brand_id=...) per active brand; each reads its own
+scheduler_settings / email_ai_settings.
 """
 
 import os
 import sys
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 # Add parent directory to path to import scraper
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from celery_app.celery import celery_app
+from database.tenancy import brand_scope
+from utils.brand_context import task_brand_id, brand_gmail_credentials, is_default_brand
 from database.operations import (
     update_job_status,
     create_scraping_result,
@@ -34,6 +47,31 @@ from scraper.scraper_with_progress import add_progress_support
 add_progress_support()
 
 
+def _brand_is_active(brand_id: str) -> bool:
+    from database import brands as brand_catalog
+    brand = brand_catalog.get_brand(brand_id)
+    return bool(brand and brand.get("is_active"))
+
+
+def _globally_suppressed(emails) -> set:
+    """Subset of `emails` (lower-cased) on the cross-brand global_suppression
+    list (hard bounces: an invalid mailbox is invalid for every brand).
+    global_suppression is a GLOBAL table, so no brand filter applies."""
+    emails = sorted({e for e in emails if e})
+    if not emails:
+        return set()
+    try:
+        from database.pg import execute_sql
+        rows = execute_sql(
+            "SELECT lower(email) AS email FROM global_suppression WHERE lower(email) = ANY(%s)",
+            [emails],
+        )
+        return {r["email"] for r in rows}
+    except Exception as e:
+        print(f"[Scheduler] Could not read global_suppression: {e}")
+        return set()
+
+
 @celery_app.task(bind=True, name="scrape_leads")
 def scrape_leads(
     self,
@@ -43,6 +81,7 @@ def scrape_leads(
     num_queries: int,
     api_key: str,
     industry: str = None,
+    brand_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Execute lead scraping job
@@ -55,10 +94,29 @@ def scrape_leads(
         num_queries: Number of queries to run
         api_key: SerpAPI key
         industry: Optional industry filter
+        brand_id: Brand that owns the job (missing on legacy messages ->
+                  the job's owner brand)
 
     Returns:
         Result summary
     """
+    bid = task_brand_id(brand_id, "scrape_leads", lookup=("scraping_jobs", job_id))
+    with brand_scope(bid):
+        return _scrape_leads(
+            self, job_id, search_query, location, num_queries, api_key, industry
+        )
+
+
+def _scrape_leads(
+    self,
+    job_id: str,
+    search_query: str,
+    location: str,
+    num_queries: int,
+    api_key: str,
+    industry: str = None,
+) -> Dict[str, Any]:
+    """Body of scrape_leads; runs inside the job's brand_scope."""
     try:
         # Initialize RAW CSV file with headers (for progressive writing)
         csv_path = initialize_csv_file(job_id)
@@ -220,17 +278,55 @@ def test_celery():
     return {"status": "ok", "message": "Celery is working!"}
 
 
-@celery_app.task(bind=True, name="celery_app.tasks.send_daily_campaign")
-def send_daily_campaign(self) -> Dict[str, Any]:
+@celery_app.task(bind=True, name="celery_app.tasks.send_daily_campaign_all_brands")
+def send_daily_campaign_all_brands(self) -> Dict[str, Any]:
     """
-    Automated daily email campaign task
+    Beat entry point (10:00 AM Malaysia time, see celery.py beat_schedule).
 
-    Runs at 10:00 AM Malaysia time (configured in celery.py beat_schedule)
+    Fans out one send_daily_campaign(brand_id=...) per ACTIVE brand; each
+    brand's run reads its own scheduler_settings (is_enabled, daily_limit,
+    delay) and email_ai_settings, so a brand whose scheduler is disabled is a
+    no-op exactly as before.
+    """
+    from database import brands as brand_catalog
+
+    dispatched, errors = [], []
+    for brand in brand_catalog.list_brands(active_only=True):
+        try:
+            res = send_daily_campaign.apply_async(
+                kwargs={"brand_id": brand["id"]}, expires=3600
+            )
+            dispatched.append({"brand_id": brand["id"], "slug": brand["slug"], "task_id": res.id})
+            print(f"[Scheduler] queued daily campaign for brand {brand['slug']} ({res.id})")
+        except Exception as e:
+            errors.append({"brand_id": brand["id"], "slug": brand["slug"], "error": str(e)})
+            print(f"[Scheduler] could not queue daily campaign for brand {brand['slug']}: {e}")
+    return {"status": "dispatched", "brands": dispatched, "errors": errors}
+
+
+@celery_app.task(bind=True, name="celery_app.tasks.send_daily_campaign")
+def send_daily_campaign(self, brand_id: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Automated daily email campaign task for ONE brand
+
+    Queued per brand by send_daily_campaign_all_brands (beat) or by the
+    scheduler "run now" endpoint with brand_id=tenancy.require_brand().
+    A legacy message without brand_id runs for brand 1 (warning logged).
     Sends personalized AI-generated emails to new leads
 
     Returns:
         Result summary with sent count, errors, and status
     """
+    bid = task_brand_id(brand_id, "send_daily_campaign")
+    if not _brand_is_active(bid):
+        print(f"[Scheduler] Brand {bid} is inactive, skipping")
+        return {'status': 'skipped', 'reason': 'Brand is inactive', 'brand_id': bid}
+    with brand_scope(bid):
+        return _send_daily_campaign(bid)
+
+
+def _send_daily_campaign(brand_id: str) -> Dict[str, Any]:
+    """Body of send_daily_campaign; runs inside brand_scope(brand_id)."""
     import time
     import uuid
     from datetime import datetime, timedelta
@@ -296,9 +392,15 @@ def send_daily_campaign(self) -> Dict[str, Any]:
         # 3. Get unemailed leads (reuse logic from campaigns.py)
         verifier = EmailVerifier()
 
-        # Get exclusion list
+        # Get exclusion list (this brand's exclusions + unsubscribes; the
+        # cross-brand global_suppression list is checked per lead below)
         exclusions_result = supabase.table('email_exclusions').select('email').execute()
         excluded_emails = {e['email'].lower() for e in (exclusions_result.data or [])}
+        try:
+            unsub_result = supabase.table('email_unsubscribes').select('email').execute()
+            excluded_emails |= {(u.get('email') or '').lower() for u in (unsub_result.data or [])}
+        except Exception as e:
+            print(f"[Scheduler] Could not load email_unsubscribes: {e}")
 
         # Get leads with status='new'
         fetch_limit = daily_limit * 3
@@ -311,10 +413,15 @@ def send_daily_campaign(self) -> Dict[str, Any]:
         all_leads = leads_result.data or []
         leads = []
 
+        # Invalid mailboxes are invalid for every brand (global, not tenant data)
+        globally_suppressed = _globally_suppressed(
+            [(l.get('email') or '').lower() for l in all_leads]
+        )
+
         for lead in all_leads:
             lead_email = lead.get('email', '').lower()
 
-            if lead_email in excluded_emails:
+            if lead_email in excluded_emails or lead_email in globally_suppressed:
                 continue
 
             # Verify email
@@ -377,23 +484,14 @@ def send_daily_campaign(self) -> Dict[str, Any]:
 
         print(f"[Scheduler] Found {len(leads)} leads to email")
 
-        # 4. Initialize clients
-        tokens_file = Path(__file__).parent.parent / '.gmail_tokens'
-        if not tokens_file.exists():
-            raise FileNotFoundError(".gmail_tokens file not found!")
-
-        tokens = {}
-        with open(tokens_file) as f:
-            for line in f:
-                line = line.strip()
-                if line and '=' in line:
-                    key, value = line.split('=', 1)
-                    tokens[key] = value
+        # 4. Initialize clients - the brand's sending mailbox (brand 1:
+        # backend/.gmail_tokens when present, else its base email_accounts row)
+        creds = brand_gmail_credentials(brand_id)
 
         gmail_client = GmailClient(
-            email=tokens.get('GMAIL_EMAIL'),
-            refresh_token=tokens.get('GMAIL_REFRESH_TOKEN'),
-            access_token=tokens.get('GMAIL_ACCESS_TOKEN')
+            email=creds['email'],
+            refresh_token=creds['refresh_token'],
+            access_token=creds['access_token']
         )
         gemini_client = get_llm_client()
 
@@ -558,17 +656,31 @@ REQUIREMENTS:
 
 
 @celery_app.task(bind=True, name="send_single_email_task")
-def send_single_email_task(self, lead_id: str, email_account_id: str) -> Dict[str, Any]:
+def send_single_email_task(
+    self, lead_id: str, email_account_id: str, brand_id: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Send a single AI-generated email to a specific lead using a connected email account.
 
     Args:
         lead_id: ID of the lead to email
         email_account_id: ID of the email account to send from
+        brand_id: Brand the lead belongs to (missing on legacy messages ->
+                  the lead's owner brand)
 
     Returns:
         Result with success status and details
     """
+    bid = task_brand_id(brand_id, "send_single_email_task", lookup=("scraped_leads", lead_id))
+    if not _brand_is_active(bid):
+        print(f"[SingleEmail] Brand {bid} is inactive, not sending")
+        return {'success': False, 'error': 'Brand is inactive'}
+    with brand_scope(bid):
+        return _send_single_email(bid, lead_id, email_account_id)
+
+
+def _send_single_email(brand_id: str, lead_id: str, email_account_id: str) -> Dict[str, Any]:
+    """Body of send_single_email_task; runs inside brand_scope(brand_id)."""
     import uuid
     from datetime import datetime
 
@@ -602,17 +714,26 @@ def send_single_email_task(self, lead_id: str, email_account_id: str) -> Dict[st
             raise ValueError("Email account is not active")
 
         # Get company config for email content (use defaults if table doesn't exist)
-        company_name = os.getenv('COMPANY_NAME', 'Your Company')
-        company_tagline = os.getenv('COMPANY_TAGLINE', 'products and services')
+        if is_default_brand(brand_id):
+            # brand 1: legacy deployment-level sources, unchanged
+            company_name = os.getenv('COMPANY_NAME', 'Your Company')
+            company_tagline = os.getenv('COMPANY_TAGLINE', 'products and services')
 
-        try:
-            config_result = supabase.table('app_config').select('*').limit(1).execute()
-            if config_result.data:
-                config = config_result.data[0]
-                company_name = config.get('company_name', company_name)
-                company_tagline = config.get('company_tagline', company_tagline)
-        except Exception as config_err:
-            print(f"[SingleEmail] Using default company config: {config_err}")
+            try:
+                config_result = supabase.table('app_config').select('*').limit(1).execute()
+                if config_result.data:
+                    config = config_result.data[0]
+                    company_name = config.get('company_name', company_name)
+                    company_tagline = config.get('company_tagline', company_tagline)
+            except Exception as config_err:
+                print(f"[SingleEmail] Using default company config: {config_err}")
+        else:
+            # other brands: never the deployment's (brand 1's) env identity -
+            # the brand's own email_ai_settings / branding
+            from config import get_company_info
+            company = get_company_info()
+            company_name = company.get('name') or 'Your Company'
+            company_tagline = company.get('tagline') or 'products and services'
 
         # Initialize clients
         gmail_client = GmailClient(

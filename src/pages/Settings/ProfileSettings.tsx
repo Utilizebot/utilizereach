@@ -16,12 +16,16 @@ import {
   Link2,
   Copy,
   Check,
-  AlertCircle
+  AlertCircle,
+  Building2
 } from 'lucide-react';
 import { useAuth, generateCampaignLink } from '../../hooks/useAuth';
 
 export function ProfileSettings() {
-  const { salesRep, updateProfile, loading } = useAuth();
+  const { salesRep, updateProfile, loading, activeBrand, brands, isPlatformAdmin } = useAuth();
+
+  const roleLabel = (r?: string | null) =>
+    ({ admin: 'Admin', manager: 'Manager', member: 'Member', sales_rep: 'Member', viewer: 'Viewer' } as Record<string, string>)[r || ''] || r || '';
 
   // Form state
   const [fullName, setFullName] = useState('');
@@ -193,12 +197,33 @@ export function ProfileSettings() {
               </label>
               <div className="px-4 py-2 bg-gray-50 rounded-lg border border-gray-200">
                 <span className="font-medium text-gray-900">
-                  {salesRep.role === 'admin' ? 'Administrator' : 'Sales Representative'}
+                  {activeBrand
+                    ? `${roleLabel(activeBrand.role)} in ${activeBrand.display_name}`
+                    : salesRep.role === 'admin' ? 'Administrator' : 'Sales Representative'}
                 </span>
+                {isPlatformAdmin && (
+                  <span className="ml-2 px-2 py-0.5 rounded-full bg-purple-100 text-purple-700 text-xs font-semibold">Platform admin</span>
+                )}
               </div>
               <p className="text-xs text-gray-500 mt-1">
-                Contact an administrator to change your role
+                Roles are per brand. Contact a brand administrator to change your role
               </p>
+              {(brands?.length ?? 0) > 1 && (
+                <div className="mt-3">
+                  <p className="text-xs font-semibold text-gray-600 mb-1.5">Your brands</p>
+                  <div className="flex flex-wrap gap-2">
+                    {brands.map((b) => (
+                      <span key={b.id}
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${
+                          b.id === activeBrand?.id ? 'bg-indigo-50 border-indigo-200 text-indigo-700' : 'bg-gray-50 border-gray-200 text-gray-600'}`}>
+                        <Building2 size={12} />
+                        {b.display_name}
+                        <span className="text-gray-400">· {roleLabel(b.role)}</span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>

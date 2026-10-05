@@ -5,8 +5,6 @@ API endpoints for lead management and funnel tracking
 
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Depends
 from fastapi.responses import StreamingResponse
-
-from api.dependencies import require_permission
 import sys
 import pandas as pd
 import io
@@ -22,8 +20,16 @@ from integrations.email_verifier import EmailVerifier
 from integrations.gmail_client import GmailClient
 from database.client import get_supabase_admin_client
 from database.pg import execute_sql
+from database import tenancy
+from database.tenancy import brand_scope
+from api.dependencies import get_current_user_from_query, require_permission
 
 router = APIRouter(prefix="/api/leads", tags=["Leads"])
+
+# Multi-brand: every query here runs inside an authenticated request whose
+# brand is bound by api.dependencies.get_current_user. Query-builder calls on
+# tenant tables are auto-scoped; every RAW execute_sql below filters each
+# tenant table it touches by brand_id = tenancy.require_brand() explicitly.
 
 # SQL equivalents of the derived per-email status computed in
 # get_sent_emails_with_engagement() (derivation order:
@@ -40,8 +46,10 @@ _SENT_STATUS_SQL = {
 # Same idea for get_sent_emails(), whose derivation uses the
 # email_replies / email_clicks tables (order: replied -> clicked ->
 # opened -> bounced -> sent).
-_HAS_REPLY_SQL = "EXISTS (SELECT 1 FROM email_replies er WHERE er.sent_email_id = sent_emails.id)"
-_HAS_CLICK_SQL = "EXISTS (SELECT 1 FROM email_clicks ec WHERE ec.sent_email_id = sent_emails.id)"
+_HAS_REPLY_SQL = ("EXISTS (SELECT 1 FROM email_replies er WHERE er.sent_email_id = sent_emails.id "
+                  "AND er.brand_id = sent_emails.brand_id)")
+_HAS_CLICK_SQL = ("EXISTS (SELECT 1 FROM email_clicks ec WHERE ec.sent_email_id = sent_emails.id "
+                  "AND ec.brand_id = sent_emails.brand_id)")
 _SENT_ENGAGEMENT_STATUS_SQL = {
     'replied': _HAS_REPLY_SQL,
     'clicked': f"NOT {_HAS_REPLY_SQL} AND {_HAS_CLICK_SQL}",
@@ -302,22 +310,23 @@ async def get_leads(
         # the total (matches the de-duplicated list above).
         sent_total = 0
         if not segment and (not status or status == 'sent'):
-            from database.pg import execute_sql
+            brand_id = tenancy.require_brand()
             base = (
                 "SELECT COUNT(*) AS n FROM ("
                 "SELECT DISTINCT lower(recipient_email) AS e FROM sent_emails s "
-                "WHERE recipient_email IS NOT NULL "
+                "WHERE s.brand_id = %s AND recipient_email IS NOT NULL "
                 "AND NOT EXISTS (SELECT 1 FROM scraped_leads sl "
-                "WHERE lower(sl.email) = lower(s.recipient_email))"
+                "WHERE sl.brand_id = s.brand_id "
+                "AND lower(sl.email) = lower(s.recipient_email))"
             )
             if search:
                 like = f"%{search}%"
                 rows = execute_sql(
                     base + " AND (recipient_email ILIKE %s OR recipient_name ILIKE %s)) t",
-                    [like, like],
+                    [brand_id, like, like],
                 )
             else:
-                rows = execute_sql(base + ") t", [])
+                rows = execute_sql(base + ") t", [brand_id])
             sent_total = (rows[0]['n'] if rows else 0) or 0
 
         return {
@@ -462,12 +471,12 @@ async def get_sent_emails_with_engagement(
         # filter is applied to a derived status in Python, so mirror that
         # derivation in SQL when it is active.
         if status and status != 'all':
-            count_where = [_SENT_STATUS_SQL.get(status, 'FALSE')]
-            count_params = []
+            count_where = ['brand_id = %s', '(' + _SENT_STATUS_SQL.get(status, 'FALSE') + ')']
+            count_params = [tenancy.require_brand()]
             if search:
                 pattern = f'%{search}%'
                 count_where.append('(recipient_email ILIKE %s OR recipient_name ILIKE %s OR subject ILIKE %s)')
-                count_params = [pattern, pattern, pattern]
+                count_params += [pattern, pattern, pattern]
             count_rows = execute_sql(
                 'SELECT COUNT(*) AS n FROM sent_emails WHERE ' + ' AND '.join(count_where),
                 count_params
@@ -488,6 +497,44 @@ async def get_sent_emails_with_engagement(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get sent emails: {str(e)}")
+
+
+# Static GET paths must be registered BEFORE /{lead_id}, otherwise the
+# path parameter route captures them (e.g. /template -> 500).
+@router.get("/template")
+async def download_template():
+    """
+    Download a CSV template for importing leads
+
+    Returns a CSV file with all the required and optional column headers
+    """
+    # Create sample data
+    template_data = {
+        'Email': ['john.doe@example.com', 'jane.smith@company.com'],
+        'Name': ['John Doe', 'Jane Smith'],
+        'Company': ['Example Corp', 'Company Inc'],
+        'Title': ['CEO', 'Marketing Director'],
+        'Phone': ['+1-555-0123', '+1-555-0456'],
+        'Industry': ['Technology', 'Marketing'],
+        'Location': ['San Francisco, CA', 'New York, NY'],
+        'Notes': ['Interested in AI solutions', 'Follow up next quarter']
+    }
+
+    df = pd.DataFrame(template_data)
+
+    # Create CSV in memory
+    output = io.BytesIO()
+    df.to_csv(output, index=False)
+    output.seek(0)
+
+    # Return as downloadable file
+    return StreamingResponse(
+        output,
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": "attachment; filename=leads_import_template.csv"
+        }
+    )
 
 
 @router.get("/{lead_id}")
@@ -615,6 +662,15 @@ async def add_lead_note(lead_id: str, note: dict, _perm: dict = Depends(require_
     Body: {"note": "text content"}
     """
     try:
+        # The lead must exist in the ACTIVE brand (query builder is auto-scoped,
+        # so another brand's id matches nothing -> 404).
+        supabase = get_supabase()
+        found = supabase.table('sent_emails').select('id').eq('id', lead_id).limit(1).execute()
+        if not found.data:
+            found = supabase.table('scraped_leads').select('id').eq('id', lead_id).limit(1).execute()
+        if not found.data:
+            raise HTTPException(status_code=404, detail="Lead not found")
+
         # For now, we'll store notes in a JSON field or create a notes table later
         # This is a placeholder endpoint
         return {
@@ -622,6 +678,8 @@ async def add_lead_note(lead_id: str, note: dict, _perm: dict = Depends(require_
             "message": "Note functionality coming soon"
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to add note: {str(e)}")
 
@@ -645,6 +703,10 @@ async def update_lead_status(lead_id: str, status_data: dict, _perm: dict = Depe
             .update({"status": new_status})\
             .eq('id', lead_id)\
             .execute()
+
+        # Auto-scoped to the active brand: no row updated -> not found here.
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Lead not found")
 
         return {
             "success": True,
@@ -737,7 +799,7 @@ async def import_leads_from_file(
     file: UploadFile = File(...),
     column_mappings: Optional[str] = None,
     segment: Optional[str] = None,
-    _perm: dict = Depends(require_permission("leads.import"))
+    _perm: dict = Depends(require_permission("leads.import")),
 ):
     """
     Import leads from uploaded Excel or CSV file
@@ -1127,12 +1189,12 @@ async def get_sent_emails(
         # The status filter is applied to a derived status in Python, so
         # mirror that derivation in SQL when it is active.
         if status and status != 'all':
-            count_where = [_SENT_ENGAGEMENT_STATUS_SQL.get(status, 'FALSE')]
-            count_params = []
+            count_where = ['brand_id = %s', '(' + _SENT_ENGAGEMENT_STATUS_SQL.get(status, 'FALSE') + ')']
+            count_params = [tenancy.require_brand()]
             if search:
                 pattern = f'%{search}%'
                 count_where.append('(recipient_email ILIKE %s OR recipient_name ILIKE %s OR subject ILIKE %s)')
-                count_params = [pattern, pattern, pattern]
+                count_params += [pattern, pattern, pattern]
             count_rows = execute_sql(
                 'SELECT COUNT(*) AS n FROM sent_emails WHERE ' + ' AND '.join(count_where),
                 count_params
@@ -1202,42 +1264,6 @@ async def get_sent_emails(
         raise HTTPException(status_code=500, detail=f"Failed to get sent emails: {str(e)}")
 
 
-@router.get("/template")
-async def download_template():
-    """
-    Download a CSV template for importing leads
-
-    Returns a CSV file with all the required and optional column headers
-    """
-    # Create sample data
-    template_data = {
-        'Email': ['john.doe@example.com', 'jane.smith@company.com'],
-        'Name': ['John Doe', 'Jane Smith'],
-        'Company': ['Example Corp', 'Company Inc'],
-        'Title': ['CEO', 'Marketing Director'],
-        'Phone': ['+1-555-0123', '+1-555-0456'],
-        'Industry': ['Technology', 'Marketing'],
-        'Location': ['San Francisco, CA', 'New York, NY'],
-        'Notes': ['Interested in AI solutions', 'Follow up next quarter']
-    }
-
-    df = pd.DataFrame(template_data)
-
-    # Create CSV in memory
-    output = io.BytesIO()
-    df.to_csv(output, index=False)
-    output.seek(0)
-
-    # Return as downloadable file
-    return StreamingResponse(
-        output,
-        media_type="text/csv",
-        headers={
-            "Content-Disposition": "attachment; filename=leads_import_template.csv"
-        }
-    )
-
-
 @router.patch("/sent-emails/{email_id}/mark-replied")
 async def mark_email_replied(email_id: str, _perm: dict = Depends(require_permission("leads.edit"))):
     """Manually mark a sent email as replied and create an email_replies record."""
@@ -1299,9 +1325,10 @@ async def sync_replies(_perm: dict = Depends(require_permission("leads.edit"))):
             """SELECT id, gmail_thread_id, gmail_message_id, recipient_email,
                       recipient_name, campaign_id, lead_id
                FROM sent_emails
-               WHERE gmail_thread_id IS NOT NULL
+               WHERE brand_id = %s
+                 AND gmail_thread_id IS NOT NULL
                  AND (status IS NULL OR status <> 'replied')""",
-            []
+            [tenancy.require_brand()]
         )
 
         if not pending_rows:
@@ -1387,8 +1414,18 @@ async def sync_replies(_perm: dict = Depends(require_permission("leads.edit"))):
 # Real-time agent activity stream (SSE)
 # ---------------------------------------------------------------------------
 
-def _fetch_agent_events(since: datetime) -> list:
-    """Query DB for agent activity events since the given timestamp."""
+def _fetch_agent_events(since: datetime, brand_id: str) -> list:
+    """Query DB for one brand's agent activity events since the given timestamp.
+
+    Runs in a worker thread (asyncio.to_thread), so the brand is passed in
+    explicitly and bound with brand_scope() instead of relying on the
+    request's ContextVar.
+    """
+    with brand_scope(brand_id):
+        return _fetch_agent_events_scoped(since, brand_id)
+
+
+def _fetch_agent_events_scoped(since: datetime, brand_id: str) -> list:
     events = []
     since_str = since.isoformat()
 
@@ -1397,10 +1434,11 @@ def _fetch_agent_events(since: datetime) -> list:
         SELECT from_email, recipient_email, recipient_name,
                subject, status, sent_at, opened_at, replied_at, bounced_at
         FROM sent_emails
-        WHERE sent_at    >= %s
+        WHERE brand_id = %s
+          AND (sent_at    >= %s
            OR opened_at  >= %s
            OR replied_at >= %s
-           OR bounced_at >= %s
+           OR bounced_at >= %s)
         ORDER BY GREATEST(
             sent_at,
             COALESCE(opened_at,  '1970-01-01'::timestamptz),
@@ -1408,7 +1446,7 @@ def _fetch_agent_events(since: datetime) -> list:
             COALESCE(bounced_at, '1970-01-01'::timestamptz)
         ) DESC
         LIMIT 50
-    """, [since_str, since_str, since_str, since_str])
+    """, [brand_id, since_str, since_str, since_str, since_str])
 
     for row in (rows or []):
         from_email, to_email, to_name, subject, status, sent_at, opened_at, replied_at, bounced_at = row
@@ -1442,11 +1480,12 @@ def _fetch_agent_events(since: datetime) -> list:
         SELECT search_query, location, status, progress,
                leads_found, started_at, completed_at
         FROM scraping_jobs
-        WHERE started_at   >= %s
-           OR completed_at >= %s
+        WHERE brand_id = %s
+          AND (started_at   >= %s
+           OR completed_at >= %s)
         ORDER BY GREATEST(started_at, COALESCE(completed_at, '1970-01-01'::timestamptz)) DESC
         LIMIT 10
-    """, [since_str, since_str])
+    """, [brand_id, since_str, since_str])
 
     for row in (job_rows or []):
         query, location, status, progress, leads_found, started_at, completed_at = row
@@ -1473,10 +1512,11 @@ def _fetch_agent_events(since: datetime) -> list:
     sched_rows = execute_sql("""
         SELECT status, emails_sent, emails_failed, started_at, completed_at
         FROM scheduler_run_history
-        WHERE started_at >= %s
+        WHERE brand_id = %s
+          AND started_at >= %s
         ORDER BY started_at DESC
         LIMIT 5
-    """, [since_str])
+    """, [brand_id, since_str])
 
     for row in (sched_rows or []):
         status, sent, failed, started_at, completed_at = row
@@ -1504,11 +1544,17 @@ def _fetch_agent_events(since: datetime) -> list:
 
 
 @router.get("/agent-stream")
-async def agent_activity_stream():
+async def agent_activity_stream(current_user: dict = Depends(get_current_user_from_query)):
     """
     SSE endpoint for real-time agent activity.
     Emits DB-sourced events every 3 s; clients reconnect automatically.
+
+    EventSource cannot send headers, so auth accepts ?token=<jwt>. The stream
+    only ever carries the caller's active brand's events: the brand is
+    captured here and re-bound inside the worker thread on every tick.
     """
+    brand_id = current_user["brand_id"]
+
     async def generate():
         # On first connect send the last 24 hours of activity
         since = datetime.utcnow() - timedelta(hours=24)
@@ -1516,7 +1562,7 @@ async def agent_activity_stream():
 
         while True:
             try:
-                events = await asyncio.to_thread(_fetch_agent_events, since)
+                events = await asyncio.to_thread(_fetch_agent_events, since, brand_id)
                 if events:
                     for ev in events:
                         yield f"data: {json.dumps(ev)}\n\n"

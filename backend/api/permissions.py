@@ -3,6 +3,12 @@ Role-Based Access Control (RBAC)
 
 Single source of truth for roles and their permissions.
 
+Roles are PER BRAND: a user's role comes from brand_members.role for the
+brand they are acting in (see api/dependencies.get_current_user), so the same
+person can be admin of one brand and viewer of another. Platform admins
+(sales_reps.is_platform_admin) act as admin in every brand and additionally
+hold PLATFORM_PERMISSIONS (creating and configuring brands).
+
 Design (v1):
   * Roles are FIXED and defined here in code (not editable at runtime).
   * Each role maps to a FIXED set of permissions ("<resource>.<action>").
@@ -132,3 +138,28 @@ def role_catalog() -> list[dict]:
         }
         for r in ROLES
     ]
+
+
+# ---------------------------------------------------------------------------
+# Platform-level permissions (not part of any brand role): held only by
+# platform admins (sales_reps.is_platform_admin).
+# ---------------------------------------------------------------------------
+PLATFORM_PERMISSIONS = frozenset({
+    "brands.manage",     # create / configure / deactivate brands
+    "brands.view_all",   # see every brand and cross-brand totals
+})
+
+
+def has_permission_for(user: dict, permission: str) -> bool:
+    """Permission check for a user dict produced by get_current_user()."""
+    if user.get("is_platform_admin"):
+        return True
+    if permission in PLATFORM_PERMISSIONS:
+        return False
+    return has_permission(user.get("brand_role") or user.get("role"), permission)
+
+
+def permissions_for_user(user: dict) -> list[str]:
+    if user.get("is_platform_admin"):
+        return sorted(ALL_PERMISSIONS | PLATFORM_PERMISSIONS)
+    return permissions_for(user.get("brand_role") or user.get("role"))

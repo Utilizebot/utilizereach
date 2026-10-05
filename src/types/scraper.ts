@@ -12,11 +12,34 @@
 // Enums and Constants
 // ============================================================================
 
-export type UserRole = 'admin' | 'manager' | 'member' | 'viewer';
+/**
+ * Per-brand role (backend api/permissions.py). Roles are PER BRAND: the same
+ * person can be admin of one brand and viewer of another.
+ */
+export type BrandRole = 'admin' | 'manager' | 'member' | 'viewer';
 
-// A permission string "<resource>.<action>" (mirrors backend api/permissions.py).
-// The backend returns the user's full permission list on /api/auth/me.
-export type Permission = string;
+/**
+ * Role as carried on the user object. /api/auth/me returns the canonical
+ * brand role; 'sales_rep' is the legacy (pre-RBAC) value, equivalent to 'member'.
+ */
+export type UserRole = BrandRole | 'sales_rep';
+
+/** One brand the user can act in (GET /api/auth/me -> brands[]). */
+export interface BrandMembership {
+  id: string;
+  slug: string;
+  display_name: string;
+  role: BrandRole;
+  is_default: boolean;
+}
+
+/** The brand the current session acts in. */
+export interface ActiveBrand {
+  id: string;
+  slug: string;
+  display_name: string;
+  role: BrandRole;
+}
 
 export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -44,10 +67,19 @@ export interface SalesRep {
   email: string;
   full_name: string;
 
-  // Role + effective permissions (permissions resolved server-side from role)
+  // Role (in the ACTIVE brand; same as brand_role)
   role: UserRole;
-  role_label?: string;
-  permissions?: Permission[];
+
+  // Multi-brand context (GET /api/auth/me, see docs/MULTIBRAND.md).
+  // Optional so older payloads (and other SalesRep-shaped rows) still type-check.
+  brand_id?: string;
+  brand_slug?: string;
+  brand_name?: string;
+  brand_role?: BrandRole;
+  global_role?: string;
+  is_platform_admin?: boolean;
+  brands?: BrandMembership[];
+  permissions?: string[];
 
   // UTM defaults for campaign tracking
   utm_source: string;

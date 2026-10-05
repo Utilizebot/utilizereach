@@ -4,6 +4,7 @@ import { ColumnMappingModal } from '../components/ColumnMappingModal';
 import { LeadTimelineModal } from '../components/LeadTimelineModal';
 import Swal from 'sweetalert2';
 import { useConfigContext } from '../context/ConfigContext';
+import { useAuth } from '../hooks/useAuth';
 import {
   Users,
   Upload,
@@ -26,7 +27,8 @@ import {
   ArrowUp,
   ArrowDown,
   ChevronDown,
-  Layers
+  Layers,
+  Phone
 } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
@@ -84,6 +86,13 @@ interface EmailAccount {
 
 export function LeadsManagement() {
   const { config } = useConfigContext();
+  const { can } = useAuth();
+  const canImport = can('leads.import');
+  const canEditLeads = can('leads.edit');
+  const canDeleteLeads = can('leads.delete');
+  const canSend = can('emails.send');
+  const canManageSegments = can('segments.manage');
+  const canManageExclusions = can('exclusions.manage');
   const [leads, setLeads] = useState<Lead[]>([]);
   const [dbTotal, setDbTotal] = useState<number | undefined>(undefined);
   const [dbStats, setDbStats] = useState<{ new_leads: number; contacted_leads: number } | undefined>(undefined);
@@ -127,12 +136,34 @@ export function LeadsManagement() {
   // Name sort state
   const [nameSortDir, setNameSortDir] = useState<'asc' | 'desc' | null>(null);
 
+  // Phone filter state
+  const [hasPhone, setHasPhone] = useState(false);
+
   // Segment states
   const [segments, setSegments] = useState<Segment[]>([]);
   const [unsegmentedCount, setUnsegmentedCount] = useState(0);
   const [activeSegment, setActiveSegment] = useState<string>(''); // '' = all
   const [segMenuOpen, setSegMenuOpen] = useState(false);
   const [segSearch, setSegSearch] = useState('');
+
+  // Segment alert modal
+  const [alertModal, setAlertModal] = useState<{
+    open: boolean;
+    segKey: string;
+    segLabel: string;
+    leadCount: number;
+    subject: string;
+    bodyHtml: string;
+    bodyText: string;
+    toEmail: string;
+    ccEmail: string;
+    loading: boolean;
+    sending: boolean;
+  }>({
+    open: false, segKey: '', segLabel: '', leadCount: 0,
+    subject: '', bodyHtml: '', bodyText: '', toEmail: '', ccEmail: '',
+    loading: false, sending: false,
+  });
 
   useEffect(() => {
     fetchSegments();
@@ -164,6 +195,48 @@ export function LeadsManagement() {
       }
     } catch (err) {
       console.error('Failed to fetch segments:', err);
+    }
+  };
+
+  const openAlertModal = async (seg: Segment) => {
+    setAlertModal(prev => ({ ...prev, open: true, segKey: seg.key, segLabel: seg.label, leadCount: seg.lead_count ?? 0, loading: true, bodyHtml: '', subject: '', bodyText: '', sending: false }));
+    try {
+      const res = await fetch(`${API_BASE}/api/segments/${encodeURIComponent(seg.key)}/alert`);
+      if (!res.ok) throw new Error((await res.json()).detail || 'Failed to load preview');
+      const data = await res.json();
+      setAlertModal(prev => ({
+        ...prev,
+        loading: false,
+        subject: data.subject,
+        bodyHtml: data.body_html,
+        bodyText: data.body_text,
+        leadCount: data.lead_count,
+        segLabel: data.segment_label,
+      }));
+    } catch (err) {
+      setAlertModal(prev => ({ ...prev, open: false, loading: false }));
+      Swal.fire({ icon: 'error', title: 'Could not load preview', text: err instanceof Error ? err.message : '' });
+    }
+  };
+
+  const sendAlert = async () => {
+    if (!alertModal.toEmail.trim()) {
+      Swal.fire({ icon: 'warning', title: 'Recipient required', text: 'Please enter an email address to send the alert to.' });
+      return;
+    }
+    setAlertModal(prev => ({ ...prev, sending: true }));
+    try {
+      const res = await fetch(`${API_BASE}/api/segments/${encodeURIComponent(alertModal.segKey)}/alert`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to_email: alertModal.toEmail.trim(), cc_email: alertModal.ccEmail.trim() }),
+      });
+      if (!res.ok) throw new Error((await res.json()).detail || 'Send failed');
+      setAlertModal(prev => ({ ...prev, open: false, sending: false }));
+      Swal.fire({ icon: 'success', title: 'Alert sent!', text: `Email sent to ${alertModal.toEmail}`, timer: 2500, showConfirmButton: false });
+    } catch (err) {
+      setAlertModal(prev => ({ ...prev, sending: false }));
+      Swal.fire({ icon: 'error', title: 'Failed to send', text: err instanceof Error ? err.message : '' });
     }
   };
 
@@ -1088,16 +1161,17 @@ export function LeadsManagement() {
     }
   };
 
-  // Pagination calculations (apply name sort first)
+  // Pagination calculations (apply phone filter then name sort)
+  const phoneFilteredLeads = hasPhone ? leads.filter(l => !!l.phone) : leads;
   const sortedLeads = nameSortDir
-    ? [...leads].sort((a, b) => {
+    ? [...phoneFilteredLeads].sort((a, b) => {
         const nameA = (a.name || '').toLowerCase();
         const nameB = (b.name || '').toLowerCase();
         if (nameA < nameB) return nameSortDir === 'asc' ? -1 : 1;
         if (nameA > nameB) return nameSortDir === 'asc' ? 1 : -1;
         return 0;
       })
-    : leads;
+    : phoneFilteredLeads;
   const totalPages = Math.ceil(sortedLeads.length / leadsPerPage);
   const startIndex = (currentPage - 1) * leadsPerPage;
   const endIndex = startIndex + leadsPerPage;
@@ -1203,6 +1277,75 @@ export function LeadsManagement() {
         />
       </div>
 
+      {/* By Segment */}
+      <motion.div
+        className="bg-white rounded-2xl shadow-lg border border-gray-200 p-6 mb-8"
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.25 }}
+      >
+        <div className="flex items-center gap-3 mb-5">
+          <div className="h-10 w-10 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-xl flex items-center justify-center">
+            <Layers className="h-5 w-5 text-white" />
+          </div>
+          <div>
+            <h2 className="text-xl font-bold text-gray-900">By Segment</h2>
+            <p className="text-sm text-gray-600">Lead count per segment — click to filter</p>
+          </div>
+        </div>
+
+        {segments.length === 0 && unsegmentedCount === 0 ? (
+          <p className="text-gray-400 text-sm">No segments yet. Import leads with a segment to get started.</p>
+        ) : (
+          <div className="flex flex-wrap gap-3">
+            {segments.map((seg) => {
+              const isLow = (seg.lead_count ?? 0) < 20;
+              const isActive = activeSegment === seg.key;
+              return (
+                <div key={seg.key} className="relative flex items-center gap-1">
+                  <button
+                    onClick={() => setActiveSegment(isActive ? '' : seg.key)}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-xl border text-sm font-medium transition-all ${
+                      isActive
+                        ? 'bg-purple-600 border-purple-600 text-white shadow-md'
+                        : isLow
+                          ? 'bg-amber-50 border-amber-300 text-amber-800 hover:border-amber-400'
+                          : 'bg-gray-50 border-gray-200 text-gray-700 hover:border-purple-400 hover:bg-purple-50'
+                    }`}
+                  >
+                    {isLow && <AlertCircle className="h-3.5 w-3.5 text-amber-500 shrink-0" />}
+                    <span>{seg.label}</span>
+                    <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${
+                      isActive ? 'bg-white/20 text-white' : isLow ? 'bg-amber-200 text-amber-800' : 'bg-purple-100 text-purple-700'
+                    }`}>
+                      {(seg.lead_count ?? 0).toLocaleString()}
+                    </span>
+                  </button>
+                  {isLow && canSend && (
+                    <button
+                      onClick={() => openAlertModal(seg)}
+                      title="Send low-lead alert email"
+                      className="flex items-center gap-1 px-2 py-2 rounded-xl border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100 text-xs font-medium transition-all"
+                    >
+                      <Mail className="h-3.5 w-3.5" />
+                      Alert
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+            {unsegmentedCount > 0 && (
+              <div className="flex items-center gap-2 px-4 py-2 rounded-xl border border-gray-200 bg-gray-50 text-sm font-medium text-gray-500">
+                <span>Unsegmented</span>
+                <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-gray-200 text-gray-600">
+                  {unsegmentedCount.toLocaleString()}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+      </motion.div>
+
       {/* Import Section */}
       <motion.div
         className="bg-white rounded-2xl shadow-lg border border-gray-200 p-6 mb-8"
@@ -1266,7 +1409,7 @@ export function LeadsManagement() {
           onDragEnter={handleDrag}
           onDragLeave={handleDrag}
           onDragOver={handleDrag}
-          onDrop={handleDrop}
+          onDrop={canImport ? handleDrop : (e) => { e.preventDefault(); e.stopPropagation(); setDragActive(false); }}
         >
           <input
             type="file"
@@ -1274,7 +1417,7 @@ export function LeadsManagement() {
             className="hidden"
             accept=".xlsx,.xls,.csv"
             onChange={handleFileSelect}
-            disabled={uploading}
+            disabled={uploading || !canImport}
           />
 
           {uploading ? (
@@ -1295,6 +1438,9 @@ export function LeadsManagement() {
               <p className="text-xs text-gray-500">
                 Supported formats: .xlsx, .xls, .csv (Required column: email)
               </p>
+              {!canImport && (
+                <p className="text-xs text-red-500 mt-2">You don't have permission to import leads.</p>
+              )}
             </label>
           )}
         </div>
@@ -1424,13 +1570,15 @@ export function LeadsManagement() {
             type="email"
             value={newExclusion}
             onChange={(e) => setNewExclusion(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && addExclusion()}
+            onKeyDown={(e) => e.key === 'Enter' && canManageExclusions && addExclusion()}
+            disabled={!canManageExclusions}
             placeholder="Enter email to exclude..."
             className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent"
           />
           <button
             onClick={addExclusion}
-            disabled={addingExclusion}
+            disabled={addingExclusion || !canManageExclusions}
+            title={canManageExclusions ? undefined : 'You do not have permission to manage exclusions'}
             className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50"
           >
             {addingExclusion ? (
@@ -1459,12 +1607,14 @@ export function LeadsManagement() {
                     )}
                   </div>
                 </div>
+                {canManageExclusions && (
                 <button
                   onClick={() => removeExclusion(exclusion.id)}
                   className="p-2 hover:bg-red-50 rounded-lg transition-colors group"
                 >
                   <Trash2 className="h-4 w-4 text-gray-400 group-hover:text-red-600" />
                 </button>
+                )}
               </div>
             ))}
           </div>
@@ -1500,7 +1650,8 @@ export function LeadsManagement() {
 
             <button
               onClick={handleLaunchCampaign}
-              disabled={launchingCampaign}
+              disabled={launchingCampaign || !canSend}
+              title={canSend ? undefined : 'You do not have permission to send email'}
               className="flex items-center gap-3 px-8 py-4 bg-white text-purple-600 rounded-xl font-bold text-lg hover:shadow-2xl transition-all disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {launchingCampaign ? (
@@ -1535,7 +1686,7 @@ export function LeadsManagement() {
           </h2>
 
           <div className="flex items-center gap-3">
-            {selectedLeads.size > 0 && (
+            {selectedLeads.size > 0 && canDeleteLeads && (
               <button
                 onClick={handleBulkDelete}
                 disabled={deleting}
@@ -1550,6 +1701,7 @@ export function LeadsManagement() {
               </button>
             )}
 
+            {canImport && (
             <button
               onClick={handleAddLead}
               disabled={addingLead}
@@ -1562,8 +1714,9 @@ export function LeadsManagement() {
               )}
               <span>Add Lead</span>
             </button>
+            )}
 
-            {isShareholdersSeg && (
+            {isShareholdersSeg && canEditLeads && (
               <button
                 onClick={handleMoveIndvToIndividual}
                 className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors"
@@ -1665,11 +1818,26 @@ export function LeadsManagement() {
             </button>
 
             <button
+              onClick={() => { setHasPhone(p => !p); setCurrentPage(1); }}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium border transition-colors ${
+                hasPhone
+                  ? 'bg-teal-600 text-white border-transparent shadow-sm'
+                  : 'bg-teal-50 text-teal-700 border-teal-200 hover:bg-teal-100'
+              }`}
+              title="Show only leads with a phone number"
+            >
+              <Phone className="h-3.5 w-3.5" />
+              Has phone
+            </button>
+
+            {canManageSegments && (
+            <button
               onClick={addSegment}
               className="flex items-center gap-1 px-3 py-1.5 rounded-full text-sm font-medium text-purple-700 bg-purple-50 border border-purple-200 hover:bg-purple-100 transition-colors"
             >
               <Plus className="h-3.5 w-3.5" /> Add segment
             </button>
+            )}
           </div>
         </div>
 
@@ -1771,7 +1939,7 @@ export function LeadsManagement() {
                       </td>
                       <td className="px-6 py-4">
                         <div className="flex items-center gap-1">
-                          {lead.status === 'new' && (
+                          {lead.status === 'new' && canSend && (
                             <button
                               onClick={() => handleSendEmailToLead(lead)}
                               disabled={sendingEmail === lead.id}
@@ -1785,6 +1953,7 @@ export function LeadsManagement() {
                               )}
                             </button>
                           )}
+                          {canDeleteLeads && (
                           <button
                             onClick={() => handleDeleteSingle(lead.id, lead.email)}
                             className="p-2 hover:bg-red-50 rounded-lg transition-colors group"
@@ -1792,6 +1961,7 @@ export function LeadsManagement() {
                           >
                             <Trash2 className="h-4 w-4 text-gray-400 group-hover:text-red-600" />
                           </button>
+                          )}
                         </div>
                       </td>
                     </motion.tr>
@@ -1883,6 +2053,109 @@ export function LeadsManagement() {
       )}
 
       <LeadTimelineModal email={timelineEmail} onClose={() => setTimelineEmail(null)} />
+
+      {/* Segment Alert Preview Modal */}
+      {alertModal.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <motion.div
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col"
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+          >
+            {/* Modal header */}
+            <div className="flex items-center justify-between p-6 border-b border-gray-200">
+              <div className="flex items-center gap-3">
+                <div className="h-10 w-10 bg-amber-100 rounded-xl flex items-center justify-center">
+                  <AlertCircle className="h-5 w-5 text-amber-600" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">Low Business Contact — {alertModal.segLabel}</h3>
+                  <p className="text-sm text-gray-500">
+                    {alertModal.leadCount} lead{alertModal.leadCount !== 1 ? 's' : ''} &mdash; below the 20-lead threshold
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setAlertModal(prev => ({ ...prev, open: false }))}
+                className="p-2 rounded-lg hover:bg-gray-100 transition-colors"
+              >
+                <XCircle className="h-5 w-5 text-gray-400" />
+              </button>
+            </div>
+
+            {/* Modal body */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+              {alertModal.loading ? (
+                <div className="flex flex-col items-center justify-center py-12 gap-3">
+                  <Loader className="h-8 w-8 text-purple-600 animate-spin" />
+                  <p className="text-gray-500 text-sm">Generating email preview…</p>
+                </div>
+              ) : (
+                <>
+                  {/* Subject */}
+                  <div>
+                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Subject</p>
+                    <p className="text-sm text-gray-800 bg-gray-50 rounded-lg px-3 py-2 border border-gray-200">{alertModal.subject}</p>
+                  </div>
+
+                  {/* Email preview */}
+                  <div>
+                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Email Preview</p>
+                    <div
+                      className="border border-gray-200 rounded-xl overflow-hidden"
+                      dangerouslySetInnerHTML={{ __html: alertModal.bodyHtml }}
+                    />
+                  </div>
+
+                  {/* Recipient */}
+                  <div>
+                    <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1 block">Send Alert To</label>
+                    <input
+                      type="email"
+                      value={alertModal.toEmail}
+                      onChange={e => setAlertModal(prev => ({ ...prev, toEmail: e.target.value }))}
+                      placeholder="admin@yourcompany.com"
+                      className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+                    />
+                  </div>
+
+                  {/* CC */}
+                  <div>
+                    <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1 block">CC <span className="font-normal text-gray-400 normal-case">(optional)</span></label>
+                    <input
+                      type="email"
+                      value={alertModal.ccEmail}
+                      onChange={e => setAlertModal(prev => ({ ...prev, ccEmail: e.target.value }))}
+                      placeholder="cc@yourcompany.com"
+                      className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Modal footer */}
+            {!alertModal.loading && (
+              <div className="flex justify-end gap-3 p-6 border-t border-gray-200">
+                <button
+                  onClick={() => setAlertModal(prev => ({ ...prev, open: false }))}
+                  className="px-4 py-2 rounded-xl border border-gray-200 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={sendAlert}
+                  disabled={alertModal.sending || !alertModal.toEmail.trim()}
+                  className="flex items-center gap-2 px-5 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold transition-colors disabled:opacity-50"
+                >
+                  {alertModal.sending ? <Loader className="h-4 w-4 animate-spin" /> : <Mail className="h-4 w-4" />}
+                  {alertModal.sending ? 'Sending…' : 'Send Alert'}
+                </button>
+              </div>
+            )}
+          </motion.div>
+        </div>
+      )}
     </div>
   );
 }

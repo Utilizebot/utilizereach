@@ -5,15 +5,19 @@
  * Uses relative URLs - nginx proxies /api/* to backend automatically
  */
 
+import { getStoredToken, withAuthToken } from './auth';
+
 // API Configuration - use relative URLs (nginx reverse proxy handles routing)
 // This works on ANY domain without configuration!
 const API_BASE_URL = '';
 
 /**
- * Get authentication token from localStorage (set by lib/auth login())
+ * Get authentication token from localStorage (set by lib/auth login()).
+ * The token also carries the active brand, so every call here is brand-scoped
+ * server-side.
  */
 async function getAuthToken(): Promise<string> {
-  const token = localStorage.getItem('auth_token');
+  const token = getStoredToken();
 
   if (!token) {
     throw new Error('Not authenticated');
@@ -243,7 +247,8 @@ export function connectToJobProgress(
   // Build WebSocket URL from current page origin
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const wsUrl = `${protocol}//${window.location.host}`;
-  const ws = new WebSocket(`${wsUrl}/ws/progress/${jobId}`);
+  // Token as a query param (WebSocket cannot send an Authorization header)
+  const ws = new WebSocket(withAuthToken(`${wsUrl}/ws/progress/${jobId}`));
 
   ws.onmessage = (event) => {
     try {

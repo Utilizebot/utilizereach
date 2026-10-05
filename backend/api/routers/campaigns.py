@@ -4,8 +4,6 @@ API endpoints for campaign management and execution
 """
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
-
-from api.dependencies import require_permission
 from pydantic import BaseModel
 from typing import Optional
 import os
@@ -22,6 +20,11 @@ from integrations.llm_client import get_llm_client
 from integrations.email_verifier import EmailVerifier
 from config import get_email_team, get_company_info
 from database.client import get_supabase_admin_client
+from database.pg import execute_sql
+from database import tenancy
+from database.tenancy import brand_scope
+from database import brands as brand_catalog
+from api.dependencies import require_permission
 
 # Load environment variables from Docker config volume if available
 config_env = Path("/app/config/.env")
@@ -32,8 +35,55 @@ else:
 
 router = APIRouter(prefix="/api/campaigns", tags=["Campaigns"])
 
-# Load AI Team from configuration file
-AI_TEAM = get_email_team()
+# NOTE: this module is imported by ops/smart_sender.py, ops/reply_handler.py and
+# ops/bounce_handler.py (load_gmail_tokens) — keep it free of import-time DB work.
+# The AI team (personas) is resolved per brand at call time: brand_email_team().
+
+
+def brand_email_team(brand_id: Optional[str] = None) -> list:
+    """Sending personas of a brand (default: the active brand).
+
+    Brand 1 (the default brand) keeps reading backend/config/team_config.json as
+    before. Every other brand uses its own brands.branding.emailTeam; persona
+    copy never leaks across brands.
+    """
+    bid = brand_id or tenancy.require_brand()
+    if brand_catalog.is_default_brand(bid):
+        return get_email_team()
+    brand = brand_catalog.get_brand(bid) or {}
+    team = (brand.get('branding') or {}).get('emailTeam') or []
+    out = []
+    for m in team if isinstance(team, list) else []:
+        if not isinstance(m, dict) or not (m.get('email') or '').strip():
+            continue
+        email = m['email'].strip()
+        out.append({
+            **m,
+            'email': email,
+            'name': (m.get('name') or email.split('@')[0].title()),
+            'title': m.get('title') or '',
+        })
+    return out
+
+
+def _brand_mailbox_configured(brand_id: str) -> bool:
+    """True when the brand has a mailbox the sender can use - the same one
+    integrations.brand_mail.get_brand_gmail_client() will build.
+
+    Brand 1: the legacy backend/.gmail_tokens file (exact previous check), else
+    its OAuth-connected base mailbox row. Other brands: their own base mailbox
+    row (an email_accounts row of THAT brand holding a refresh_token).
+    """
+    if brand_catalog.is_default_brand(brand_id):
+        if (Path(__file__).parent.parent.parent / '.gmail_tokens').exists():
+            return True
+    try:
+        from integrations.brand_mail import describe_brand_mailbox
+        source, _email = describe_brand_mailbox(brand_id)
+        return source is not None
+    except Exception as e:
+        print(f"Warning: could not check mailboxes for brand {brand_id}: {e}")
+        return False
 
 
 class CampaignStartRequest(BaseModel):
@@ -77,9 +127,16 @@ def get_unemailed_leads(limit: int = 50, verify_emails: bool = True, segment: Op
     supabase = get_supabase()
     verifier = EmailVerifier()
 
-    # Get exclusion list
+    # Get exclusion list (query builder: scoped to the active brand)
     exclusions_result = supabase.table('email_exclusions').select('email').execute()
     excluded_emails = {e['email'].lower() for e in (exclusions_result.data or [])}
+
+    # ...plus this brand's unsubscribes
+    try:
+        unsub_result = supabase.table('email_unsubscribes').select('email').execute()
+        excluded_emails |= {u['email'].lower() for u in (unsub_result.data or []) if u.get('email')}
+    except Exception as e:
+        print(f"Warning: could not load unsubscribes: {e}")
 
     # Get all leads from scraped_leads (get more to account for invalid emails)
     fetch_limit = limit * 3 if verify_emails else limit * 2
@@ -92,12 +149,27 @@ def get_unemailed_leads(limit: int = 50, verify_emails: bool = True, segment: Op
 
     all_leads = leads_result.data or []
 
+    # ...plus the cross-brand global suppression list (hard bounces: an invalid
+    # mailbox is invalid for every brand). Global table - not tenant data.
+    candidates = list({(l.get('email') or '').lower() for l in all_leads if l.get('email')})
+    if candidates:
+        try:
+            suppressed = execute_sql(
+                "SELECT lower(email) AS email FROM global_suppression WHERE lower(email) = ANY(%s)",
+                [candidates],
+            )
+            excluded_emails |= {r['email'] for r in (suppressed or []) if r.get('email')}
+        except Exception as e:
+            print(f"Warning: could not check global suppression: {e}")
+
     # Filter out leads that have already been emailed or are excluded
     unemailed_leads = []
     invalid_count = 0
 
     for lead in all_leads:
-        lead_email = lead.get('email', '').lower()
+        lead_email = (lead.get('email') or '').lower()
+        if not lead_email:
+            continue  # no address to send to
 
         # Skip if excluded
         if lead_email in excluded_emails:
@@ -296,31 +368,40 @@ Write as if you personally researched {lead_company} and are genuinely reaching 
         return None
 
 
-async def run_campaign_background(max_emails: int, delay_seconds: int, segment: Optional[str] = None):
+def run_campaign_background(max_emails: int, delay_seconds: int, segment: Optional[str] = None,
+                            brand_id: Optional[str] = None):
     """
     Run email campaign in background
+
+    Runs after the response (in the threadpool, so the rate-limit sleeps never
+    block the event loop) and therefore outside the request's brand context:
+    the whole run executes inside brand_scope(brand_id).
 
     Args:
         max_emails: Maximum number of emails to send
         delay_seconds: Delay between emails (rate limiting)
         segment: Optional segment key to restrict the campaign to one segment
+        brand_id: Brand this campaign runs for (captured by /start)
     """
+    if not brand_id:
+        print("Campaign error: no brand id - refusing to run outside a brand")
+        return {'success': False, 'error': 'No brand selected for this campaign run'}
+    with brand_scope(brand_id):
+        return _run_campaign(max_emails, delay_seconds, segment, brand_id)
+
+
+def _run_campaign(max_emails: int, delay_seconds: int, segment: Optional[str], brand_id: str):
     import time
 
     try:
-        # Initialize clients
-        tokens = load_gmail_tokens()
-        base_email = tokens.get('GMAIL_EMAIL')
-        refresh_token = tokens.get('GMAIL_REFRESH_TOKEN')
-        access_token = tokens.get('GMAIL_ACCESS_TOKEN')
-
-        gmail_client = GmailClient(
-            email=base_email,
-            refresh_token=refresh_token,
-            access_token=access_token
-        )
+        # Initialize clients: the brand's own mailbox (brand 1: .gmail_tokens
+        # exactly as before; other brands: their OAuth-connected base mailbox)
+        from integrations.brand_mail import get_brand_gmail_client
+        gmail_client = get_brand_gmail_client(brand_id)
 
         gemini_client = get_llm_client()
+
+        ai_team = brand_email_team(brand_id)
 
         # Get unemailed leads
         leads = get_unemailed_leads(max_emails, segment=segment)
@@ -337,7 +418,7 @@ async def run_campaign_background(max_emails: int, delay_seconds: int, segment: 
         # Distribute leads across AI team (round-robin)
         lead_assignments = []
         for idx, lead in enumerate(leads):
-            sender = AI_TEAM[idx % len(AI_TEAM)]
+            sender = ai_team[idx % len(ai_team)]
             lead_assignments.append({
                 'lead': lead,
                 'sender': sender
@@ -413,7 +494,8 @@ async def run_campaign_background(max_emails: int, delay_seconds: int, segment: 
 
 
 @router.post("/start")
-async def start_campaign(request: CampaignStartRequest, background_tasks: BackgroundTasks, _perm: dict = Depends(require_permission("emails.send"))):
+async def start_campaign(request: CampaignStartRequest, background_tasks: BackgroundTasks,
+                         _perm: dict = Depends(require_permission("emails.send"))):
     """
     Start an email campaign
 
@@ -428,12 +510,20 @@ async def start_campaign(request: CampaignStartRequest, background_tasks: Backgr
         Campaign start confirmation and estimated details
     """
     try:
-        # Check if .gmail_tokens exists
-        tokens_file = Path(__file__).parent.parent.parent / '.gmail_tokens'
-        if not tokens_file.exists():
+        brand_id = tenancy.require_brand()
+
+        # The active brand must have its own mailbox (brand 1: .gmail_tokens)
+        if not _brand_mailbox_configured(brand_id):
             raise HTTPException(
                 status_code=400,
                 detail="Gmail tokens not configured. Please authenticate with Gmail first."
+            )
+
+        # ...and its own sending personas
+        if not brand_email_team(brand_id):
+            raise HTTPException(
+                status_code=400,
+                detail="No sending personas configured for this brand. Add an email team in brand settings first."
             )
 
         # Get count of unemailed leads
@@ -453,7 +543,8 @@ async def start_campaign(request: CampaignStartRequest, background_tasks: Backgr
             run_campaign_background,
             request.max_emails,
             request.delay_seconds,
-            request.segment
+            request.segment,
+            brand_id,
         )
 
         seg_note = f' in segment "{request.segment}"' if request.segment else ''

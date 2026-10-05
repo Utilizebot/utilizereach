@@ -17,7 +17,7 @@ CREATE INDEX IF NOT EXISTS idx_email_exclusions_email ON email_exclusions(email)
 INSERT INTO email_exclusions (email, reason, excluded_by) VALUES
 ('demo.com', 'Internal test account', 'system'),
 ('demo.com', 'Team member', 'system')
-ON CONFLICT (email) DO NOTHING;
+ON CONFLICT DO NOTHING;
 
 -- Add RLS policies (if using Row Level Security)
 ALTER TABLE email_exclusions ENABLE ROW LEVEL SECURITY;

@@ -2,12 +2,15 @@
 Test Email Router - Quick send with AI personalization + Gmail API
 Works directly without Celery workers. Uses the multi-provider LLM client
 (integrations.llm_client) configured in email_ai_settings.
+
+Multi-brand: everything runs as the ACTIVE brand (bound by get_current_user):
+its email_ai_settings (query builder, auto-scoped), its personas
+(api.routers.campaigns.brand_email_team) and its own mailbox
+(integrations.brand_mail.get_brand_gmail_client).
 """
 
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.concurrency import run_in_threadpool
-
-from api.dependencies import require_permission
 from pydantic import BaseModel
 from typing import Optional
 import os
@@ -18,6 +21,10 @@ import traceback
 
 # Add parent paths for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from database import tenancy
+from database.tenancy import brand_scope
+from api.dependencies import require_permission
 
 router = APIRouter(prefix="/api/test-email", tags=["test-email"])
 
@@ -59,12 +66,16 @@ class TestEmailRequest(BaseModel):
     subject: Optional[str] = None
     body_html: Optional[str] = None
     body_text: Optional[str] = None
+    # Optional: send as one of the active brand's personas (alias on its mailbox).
+    # Omitted -> sent as the brand's base mailbox (previous behaviour).
+    from_email: Optional[str] = None
 
 
 class PreviewEmailRequest(BaseModel):
     to_email: str
     to_name: Optional[str] = ""
     hints: Optional[str] = ""
+    from_email: Optional[str] = None
 
 
 class TestEmailResponse(BaseModel):
@@ -83,8 +94,41 @@ class PreviewEmailResponse(BaseModel):
     preview: Optional[str] = None
 
 
-def _generate_test_email_sync(recipient_name: str, recipient_email: str, custom_message: str = "", hints: str = "") -> dict:
-    """Generate a personalized test email using the configured LLM provider."""
+def _brand_personas() -> list:
+    """The active brand's sending personas (brand 1: config/team_config.json)."""
+    from api.routers.campaigns import brand_email_team
+    return brand_email_team(tenancy.require_brand())
+
+
+def _resolve_persona(from_email: Optional[str]) -> Optional[dict]:
+    """The active brand's persona for `from_email`; None when not requested.
+
+    Only this brand's personas are accepted: a 400 for anything else, so a
+    brand can never send as another brand's alias.
+    """
+    if not from_email or not from_email.strip():
+        return None
+    wanted = from_email.strip().lower()
+    for p in _brand_personas():
+        if (p.get("email") or "").strip().lower() == wanted:
+            return p
+    raise HTTPException(status_code=400, detail=f"{from_email} is not one of this brand's sending personas.")
+
+
+def _generate_test_email_sync(recipient_name: str, recipient_email: str, custom_message: str = "", hints: str = "",
+                              brand_id: Optional[str] = None, persona: Optional[dict] = None) -> dict:
+    """Generate a personalized test email using the configured LLM provider.
+
+    Runs in a worker thread: re-enter the caller's brand explicitly.
+    """
+    if brand_id:
+        with brand_scope(brand_id):
+            return _generate_test_email_body(recipient_name, recipient_email, custom_message, hints, persona)
+    return _generate_test_email_body(recipient_name, recipient_email, custom_message, hints, persona)
+
+
+def _generate_test_email_body(recipient_name: str, recipient_email: str, custom_message: str = "", hints: str = "",
+                              persona: Optional[dict] = None) -> dict:
     from integrations.llm_client import get_llm_client
 
     settings = get_email_ai_settings()
@@ -105,8 +149,18 @@ def _generate_test_email_sync(recipient_name: str, recipient_email: str, custom_
     if company_services:
         services_block = f"\nThe company offers:\n{company_services}\n"
 
+    # Who the email is from: a generic team member (previous behaviour), or the
+    # chosen persona of the active brand.
+    sender_desc = "a team member"
+    if persona:
+        sender_desc = persona.get("name") or "a team member"
+        if persona.get("title"):
+            sender_desc += f", {persona['title']},"
+        if persona.get("persona"):
+            extra_context += f"Write in this voice: {persona['persona']}\n"
+
     # CTA / contact details are injected programmatically after generation
-    prompt = f"""Write a short, warm, professional outreach email from a team member at {company_name}{tagline_line} to {recipient_name}.
+    prompt = f"""Write a short, warm, professional outreach email from {sender_desc} at {company_name}{tagline_line} to {recipient_name}.
 {extra_context}{services_block}
 Requirements:
 - Warm and professional tone, not salesy or generic
@@ -192,46 +246,45 @@ Return ONLY valid JSON, no markdown fences."""
     return email_data
 
 
-async def generate_test_email(recipient_name: str, recipient_email: str, custom_message: str = "", hints: str = "") -> dict:
-    """Async wrapper: run the (blocking) LLM generation in a thread pool."""
+async def generate_test_email(recipient_name: str, recipient_email: str, custom_message: str = "", hints: str = "",
+                              persona: Optional[dict] = None) -> dict:
+    """Async wrapper: run the (blocking) LLM generation in a thread pool,
+    carrying the active brand into the worker thread."""
     return await run_in_threadpool(
-        _generate_test_email_sync, recipient_name, recipient_email, custom_message, hints
+        _generate_test_email_sync, recipient_name, recipient_email, custom_message, hints,
+        tenancy.require_brand(), persona,
     )
 
 
-def get_oauth_account():
-    """Get an email account with OAuth refresh token from Supabase"""
-    from database.client import get_supabase_client
-    supabase = get_supabase_client()
+def get_brand_mailbox():
+    """Gmail client for the ACTIVE brand's own mailbox.
 
-    result = supabase.table("email_accounts") \
-        .select("*") \
-        .neq("refresh_token", "null") \
-        .eq("is_active", True) \
-        .limit(1) \
-        .execute()
-
-    # Filter out accounts where refresh_token is actually None/empty
-    accounts = [a for a in (result.data or []) if a.get("refresh_token")]
-
-    if not accounts:
+    Brand 1 keeps its legacy mailbox; other brands use their OAuth-connected
+    base mailbox. Never another brand's. Gmail auth errors propagate to the
+    caller, which maps them to a "reconnect Gmail" message (as before).
+    """
+    from integrations.brand_mail import get_brand_gmail_client, NoBrandMailboxError
+    try:
+        return get_brand_gmail_client(tenancy.require_brand())
+    except NoBrandMailboxError as e:
+        print(f"[Test Email] No usable mailbox: {e}")
         raise HTTPException(
             status_code=400,
             detail="No email account with OAuth connected. Go to Email Accounts and connect a Gmail account first."
         )
 
-    return accounts[0]
-
 
 @router.post("/preview", response_model=PreviewEmailResponse)
-async def preview_test_email(request: PreviewEmailRequest, _perm: dict = Depends(require_permission("emails.send"))):
+async def preview_test_email(request: PreviewEmailRequest,
+                             _perm: dict = Depends(require_permission("emails.send"))):
     """
     Generate a test email via AI (no sending). Returns subject + body for user review.
     """
     try:
         recipient_name = request.to_name or request.to_email.split("@")[0].title()
+        persona = _resolve_persona(request.from_email)
         print(f"[Test Email Preview] Generating preview for {recipient_name} <{request.to_email}>...")
-        email_data = await generate_test_email(recipient_name, request.to_email, "", request.hints or "")
+        email_data = await generate_test_email(recipient_name, request.to_email, "", request.hints or "", persona)
         subject = email_data.get("subject") or "Quick introduction"
         body_html = email_data.get("body_html", "")
         body_text = email_data.get("body_text", "")
@@ -251,7 +304,8 @@ async def preview_test_email(request: PreviewEmailRequest, _perm: dict = Depends
 
 
 @router.post("/send", response_model=TestEmailResponse)
-async def send_test_email(request: TestEmailRequest, _perm: dict = Depends(require_permission("emails.send"))):
+async def send_test_email(request: TestEmailRequest,
+                          _perm: dict = Depends(require_permission("emails.send"))):
     """
     Send a personalized test email.
     If subject/body_html/body_text are provided (from a preview), skips AI generation.
@@ -260,6 +314,7 @@ async def send_test_email(request: TestEmailRequest, _perm: dict = Depends(requi
     """
     try:
         recipient_name = request.to_name or request.to_email.split("@")[0].title()
+        persona = _resolve_persona(request.from_email)
 
         # Step 1: Use pre-generated content if available, otherwise generate now
         if request.subject and request.body_html and request.body_text:
@@ -273,7 +328,7 @@ async def send_test_email(request: TestEmailRequest, _perm: dict = Depends(requi
             print(f"[Test Email] Generating email for {recipient_name} <{request.to_email}>...")
             email_data = await generate_test_email(
                 recipient_name, request.to_email,
-                request.custom_message or "", request.hints or ""
+                request.custom_message or "", request.hints or "", persona
             )
 
         subject = email_data.get("subject") or "Quick introduction"
@@ -283,17 +338,20 @@ async def send_test_email(request: TestEmailRequest, _perm: dict = Depends(requi
         # Step 2: Send via Gmail API
         print(f"[Test Email] Sending via Gmail API...")
 
-        from integrations.gmail_client import GmailClient
+        # The active brand's own mailbox (blocking OAuth refresh -> threadpool,
+        # with the brand carried explicitly into the worker thread)
+        brand_id = tenancy.require_brand()
 
-        account = get_oauth_account()
+        def _mailbox():
+            with brand_scope(brand_id):
+                return get_brand_mailbox()
 
-        gmail = GmailClient(
-            email=account["email"],
-            refresh_token=account["refresh_token"],
-            access_token=account.get("access_token"),
-        )
+        gmail = await run_in_threadpool(_mailbox)
 
         tracking_token = str(uuid.uuid4())
+        send_kwargs = {}
+        if persona:
+            send_kwargs = {"from_email": persona["email"], "from_name": persona.get("name")}
         send_result = gmail.send_email(
             to_email=request.to_email,
             to_name=recipient_name,
@@ -303,13 +361,15 @@ async def send_test_email(request: TestEmailRequest, _perm: dict = Depends(requi
             tracking_token=tracking_token,
             backend_url=os.getenv("BACKEND_URL", "http://localhost:8000"),
             save_to_db=False,
+            **send_kwargs,
         )
 
         print(f"[Test Email] Sent! Message ID: {send_result.get('gmail_message_id')}")
 
+        sent_from = persona["email"] if persona else gmail.email
         return TestEmailResponse(
             success=True,
-            message=f"Email sent to {recipient_name} <{request.to_email}> from {account['email']}",
+            message=f"Email sent to {recipient_name} <{request.to_email}> from {sent_from}",
             subject=subject,
             preview=body_text[:200] if body_text else None,
             gmail_message_id=send_result.get("gmail_message_id"),
@@ -335,6 +395,18 @@ async def send_test_email(request: TestEmailRequest, _perm: dict = Depends(requi
             )
 
         raise HTTPException(status_code=500, detail=error_msg)
+
+
+@router.get("/personas")
+async def get_sending_personas_for_test():
+    """The active brand's sending personas (for the optional From picker)."""
+    try:
+        return {"personas": [
+            {"email": p.get("email"), "name": p.get("name"), "title": p.get("title", "")}
+            for p in _brand_personas()
+        ]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/accounts")

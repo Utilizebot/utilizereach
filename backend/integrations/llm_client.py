@@ -11,13 +11,14 @@ Supported providers:
   - custom      Any OpenAI-compatible endpoint (Ollama, LM Studio, open-webui,
                 vLLM, ...) via base_url
 
-Provider/model/key are configured in the email_ai_settings table (Settings →
-Email AI in the UI, or the Setup Wizard), with environment variables as
-fallback. All providers expose the same generate_email() contract the rest of
+Provider/model/key are configured in the email_ai_settings table - one row
+per brand, read for the ACTIVE brand (Settings → Email AI in the UI, or the
+Setup Wizard) - with environment variables as fallback. All providers expose the same generate_email() contract the rest of
 the backend already uses.
 """
 
 import os
+import re
 import json
 import shutil
 import subprocess
@@ -74,7 +75,13 @@ class LLMClient:
         self.provider = provider
         self.model = (model or "").strip() or DEFAULT_MODELS[provider]
         self.base_url = (base_url or "").strip().rstrip("/")
-        self.api_key = (api_key or "").strip() or os.getenv(ENV_KEYS.get(provider, ""), "")
+        raw_key = (api_key or "").strip() or os.getenv(ENV_KEYS.get(provider, ""), "")
+        # Pool of API keys (newline / comma / whitespace separated). On a rate or
+        # quota limit the client auto-rotates to the next key. A single key is a
+        # pool of one (unchanged behavior).
+        self.api_keys = [k.strip() for k in re.split(r"[\s,]+", raw_key) if k.strip()]
+        self._key_idx = 0
+        self.api_key = self.api_keys[0] if self.api_keys else ""
 
         if provider == "gemini":
             self._gemini = GeminiClient(api_key=self.api_key or None)
@@ -104,8 +111,51 @@ class LLMClient:
     # Raw completion per provider
     # ------------------------------------------------------------------
 
+    RATE_MARKERS = ("429", "rate limit", "ratelimit", "rate_limit", "quota",
+                    "resource_exhausted", "resource exhausted", "insufficient_quota",
+                    "overloaded", "too many requests")
+
+    def _is_rate_error(self, e) -> bool:
+        s = str(e).lower()
+        return any(m in s for m in self.RATE_MARKERS)
+
+    def _activate_key(self):
+        """Point the provider client at self.api_keys[self._key_idx]."""
+        self.api_key = self.api_keys[self._key_idx] if self.api_keys else ""
+        if self.provider == "gemini":
+            self._gemini = GeminiClient(api_key=self.api_key or None)
+        elif self.provider == "claude":
+            import anthropic
+            self._anthropic = anthropic.Anthropic(api_key=self.api_key)
+        # openai / custom read self.api_key in the request header at call time
+
+    def _advance_key(self) -> bool:
+        """Rotate to the next key in the pool. Returns False if the pool has <=1 key."""
+        if len(self.api_keys) <= 1:
+            return False
+        self._key_idx = (self._key_idx + 1) % len(self.api_keys)
+        self._activate_key()
+        return True
+
     def _complete(self, prompt: str, max_tokens: int = 4096) -> Tuple[str, Dict]:
-        """Run one prompt, return (text, {'input': n, 'output': n})."""
+        """Run one prompt with automatic API-key rotation: if the active key hits a
+        rate/quota limit, switch to the next key in the pool and retry. Non-rate
+        errors are raised immediately."""
+        attempts = max(1, len(self.api_keys))
+        last = None
+        for _ in range(attempts):
+            try:
+                return self._complete_once(prompt, max_tokens)
+            except Exception as e:
+                last = e
+                if self._is_rate_error(e) and self._advance_key():
+                    print(f"[llm] key rate-limited — rotated to key #{self._key_idx + 1}/{len(self.api_keys)}", flush=True)
+                    continue
+                raise
+        raise Exception(f"All {attempts} API key(s) rate-limited / exhausted. Last error: {last}")
+
+    def _complete_once(self, prompt: str, max_tokens: int = 4096) -> Tuple[str, Dict]:
+        """Run one prompt on the ACTIVE key, return (text, {'input': n, 'output': n})."""
         if self.provider == "gemini":
             response = self._gemini.model.generate_content(prompt)
             usage = {"input": 0, "output": 0}
@@ -244,19 +294,16 @@ class LLMClient:
             return False, str(e)
 
 
-def get_llm_client() -> LLMClient:
-    """Build an LLMClient from email_ai_settings (DB), falling back to env.
+def _read_brand_ai_settings(brand_id: Optional[str] = None) -> Optional[Dict]:
+    """The email_ai_settings row of the active brand (or `brand_id`).
 
-    Env fallbacks: AI_PROVIDER, AI_MODEL, AI_BASE_URL, plus the per-provider
-    key vars (GEMINI_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY).
+    email_ai_settings is one row PER BRAND; the query builder scopes the read
+    to the active brand. Nothing is cached at module level.
     """
-    provider = os.getenv("AI_PROVIDER", "")
-    model = os.getenv("AI_MODEL", "")
-    api_key = ""
-    base_url = os.getenv("AI_BASE_URL", "")
+    from database import tenancy
+    from database.client import get_supabase_admin_client
 
-    try:
-        from database.client import get_supabase_admin_client
+    def _read():
         row = (
             get_supabase_admin_client()
             .table("email_ai_settings")
@@ -264,8 +311,41 @@ def get_llm_client() -> LLMClient:
             .limit(1)
             .execute()
         )
-        if row.data:
-            settings = row.data[0]
+        return row.data[0] if row.data else None
+
+    active = tenancy.current_brand()
+    if brand_id and str(brand_id) != (active or ""):
+        with tenancy.brand_scope(str(brand_id)):
+            return _read()
+    if not active:
+        raise tenancy.TenancyError("No active brand: cannot read email_ai_settings")
+    return _read()
+
+
+def get_llm_client(brand_id: Optional[str] = None) -> LLMClient:
+    """Build an LLMClient from the active brand's email_ai_settings (DB),
+    falling back to env.
+
+    Env fallbacks: AI_PROVIDER, AI_MODEL, AI_BASE_URL, plus the per-provider
+    key vars (GEMINI_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY).
+    """
+    from database import tenancy
+
+    active = tenancy.current_brand()
+    if brand_id and active and str(brand_id) != active and not tenancy.in_system_scope():
+        # never silently fall back here: this is a cross-brand read attempt
+        raise tenancy.TenancyError(
+            f"Refusing to read brand {brand_id} AI settings while acting as {active}"
+        )
+
+    provider = os.getenv("AI_PROVIDER", "")
+    model = os.getenv("AI_MODEL", "")
+    api_key = ""
+    base_url = os.getenv("AI_BASE_URL", "")
+
+    try:
+        settings = _read_brand_ai_settings(brand_id)
+        if settings:
             provider = settings.get("ai_provider") or provider
             model = settings.get("ai_model") or model
             api_key = settings.get("ai_api_key") or api_key

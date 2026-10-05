@@ -67,6 +67,28 @@ bounces in a real-time dashboard.
 - **Analytics** — period-aware dashboard: deliverability, engagement funnel,
   per-persona / per-segment / per-campaign breakdowns.
 - **Compliance** — one-click unsubscribe endpoint and exclusion lists.
+- **Multi-brand workspaces** — run several brands (companies, clients,
+  products) from one deployment with full data isolation, enforced in the app,
+  by brand-scoped foreign keys, and by PostgreSQL row-level security.
+- **Per-brand everything** — each brand has its own mailboxes and personas, AI
+  settings, branding/theme (dashboard and public forms), sending caps and
+  pacing, leads, segments, campaigns and analytics.
+- **Brand switcher** — users who belong to several brands switch from the top
+  bar; a brand can also be pinned to its own hostname.
+- **Roles per brand + platform admins** — four roles (Admin, Manager, Member,
+  Viewer) assigned per brand; platform admins create and manage brands.
+- **Opt-outs that respect brands** — unsubscribes and exclusions are per brand,
+  while hard bounces go to a global suppression list shared by every brand.
+- **What's Winning** — analytics on what performs best (AI vs. template copy,
+  sending accounts, subject lines, segments, owners / account managers) plus
+  data-grounded AI recommendations from your configured LLM.
+- **Follow-up control** — edit a campaign's follow-up steps and optionally
+  send follow-ups only to contacts who opened or clicked (engagement gating).
+- **Owner / account-manager attribution** — assign a lead owner (per lead or
+  for a whole segment) and an account manager per campaign, and compare their
+  results.
+- **Excel export** — download the filtered sent-emails view as an
+  Excel-ready CSV.
 
 ## Stack
 
@@ -115,6 +137,7 @@ cd utilizereach
 # 1. Copy and fill in environment variables
 cp .env.example .env
 cp backend/.env.example backend/.env        # set JWT_SECRET, DB creds, LLM key, Google OAuth
+echo "APP_DB_PASSWORD=$(openssl rand -hex 24)" >> .env   # password for the least-privilege app_rw DB role
 
 # 2. Bring up the stack
 docker compose up -d --build
@@ -124,7 +147,19 @@ docker compose up -d --build
 open http://localhost:3000
 ```
 
-The first unauthenticated account you register becomes the admin.
+The first account you register in the Setup Wizard becomes the admin of the
+default brand and a platform admin.
+
+`APP_DB_PASSWORD` lets the app connect as the least-privilege `app_rw`
+database role, so PostgreSQL row-level security isolates brands even for raw
+SQL. Without it the app connects as the schema owner (fine for a single brand;
+set it before adding a second one). See
+[docs/MULTIBRAND.md](./docs/MULTIBRAND.md#the-app_rw-role-app_db_password-and-tenancy_app_role).
+
+**Upgrading from v1.x?** Back up the database first, then follow
+[Upgrading from v1.x](./docs/MULTIBRAND.md#upgrading-from-v1x) — the migration
+runs automatically on backend start and moves all existing data into the
+default brand.
 
 ## Connecting email (Gmail) — read this first
 
@@ -149,21 +184,43 @@ Authorized redirect URI to register in Google Cloud:
 `<PUBLIC_BASE_URL>/api/email-accounts/google/callback` — then `docker compose restart backend`
 and connect under **Email Accounts**.
 
+## Multi-brand
+
+One deployment can serve many brands. Every brand is a fully isolated
+workspace — its own mailboxes, personas, AI settings, branding, sending caps,
+leads, segments, campaigns, opt-outs, analytics and team. Platform admins
+create brands under **Settings → Brands**; brand admins configure their brand
+under **Settings → Brand** and invite teammates under **Settings → Users**.
+Users who belong to several brands switch between them from the top bar.
+
+Isolation is enforced in three layers (app-level brand scoping, brand-scoped
+foreign keys, and PostgreSQL row-level security), and an automated cross-brand
+leak suite lives in `backend/tests/multibrand/`. The cron sender runs every
+sending-enabled brand in one go via `ops/run_senders.py`.
+
+👉 **Architecture, rules for contributors, the sender settings, the API, and the
+v1.x upgrade guide: [docs/MULTIBRAND.md](./docs/MULTIBRAND.md).**
+
 ## Configuration
 
 - **Branding** — set your company name, logo, colors, and form copy in the Setup
-  Wizard (persisted to `config.json`); no code changes needed.
+  Wizard for the default brand, and per brand under **Settings → Brand**; no
+  code changes needed.
 - **LLM provider** — Settings → Email AI. Supports `claude`, `gemini`, `openai`,
   or `custom` (any OpenAI-compatible `base_url`, e.g. Ollama/self-hosted).
-- **Sending / warm-up** — after connecting Gmail (above), the paced warm-up sender runs
-  from `ops/smart_sender.py` (schedule with cron); reply + bounce handling from
-  `ops/reply_handler.py` and `ops/bounce_handler.py`.
+- **Sending / warm-up** — after connecting Gmail (above), the paced warm-up sender
+  `ops/smart_sender.py` runs from cron via `ops/run_senders.py` (one sender per
+  sending-enabled brand); reply + bounce handling from `ops/reply_handler.py` and
+  `ops/bounce_handler.py`. Daily caps and pacing can be set per brand. See
+  [docs/MULTIBRAND.md](./docs/MULTIBRAND.md#cron) for a cron example.
 
 ## Roles & permissions
 
-UtilizeReach has built-in role-based access control. The first account created in
-the Setup Wizard is the **Admin**; admins add teammates and assign roles in
-**Settings → Users**.
+UtilizeReach has built-in role-based access control, and **roles are per
+brand**: the same person can be an Admin in one brand and a Viewer in another.
+The first account created in the Setup Wizard is the **Admin** of the default
+brand (and a platform admin); brand admins add teammates and assign roles for
+their brand in **Settings → Users**.
 
 | Role | Can do |
 |------|--------|
@@ -171,6 +228,10 @@ the Setup Wizard is the **Admin**; admins add teammates and assign roles in
 | **Manager** | Run the whole outreach operation — create/edit/delete campaigns, import/work/delete leads, send, manage segments & exclusions, view the team. Cannot manage users, credentials, or system settings. |
 | **Member** | Create & run campaigns, import and work leads, send email, run the scraper. Cannot delete campaigns/leads or change team/config. |
 | **Viewer** | Read-only access to dashboards, campaigns, leads, and analytics. |
+
+**Platform admins** are a separate, deployment-wide flag: they can create,
+edit and deactivate brands and switch into any brand. Removing someone from a
+brand takes effect on their next request.
 
 Permissions are **action-gated** (every authenticated user can read; roles decide
 who can create/edit/delete/manage) and defined in one place —
