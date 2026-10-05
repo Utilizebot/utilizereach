@@ -7,9 +7,16 @@ Credential fields by platform:
   tiktok    – access_token, open_id     (from TikTok for Developers OAuth)
   facebook  – page_access_token, page_id
   instagram – ig_account_id, access_token  (same Facebook app token)
+
+Multi-brand: social_media_accounts / social_media_posts are tenant tables
+(unique (brand_id, platform)); the tables themselves live in
+database/multibrand.sql (no runtime DDL). Every endpoint runs inside an
+authenticated request, and every raw query below filters by the active brand
+explicitly (tenancy.require_brand()). The four platform rows are seeded lazily
+per brand.
 """
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
 import requests
@@ -20,39 +27,34 @@ import hmac
 import time
 import uuid
 
-from api.dependencies import require_permission
 from database.pg import execute_sql
+from database.tenancy import require_brand
+from api.dependencies import require_permission
 
 router = APIRouter(prefix="/api/social-accounts", tags=["social-accounts"])
 
+PLATFORMS = ("linkedin", "tiktok", "facebook", "instagram")
 
-# ── Table ─────────────────────────────────────────────────────────────────────
 
-def _ensure_table():
-    execute_sql("""
-        CREATE TABLE IF NOT EXISTS social_media_accounts (
-            id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-            platform    TEXT UNIQUE NOT NULL,
-            credentials JSONB DEFAULT '{}',
-            is_connected BOOLEAN DEFAULT FALSE,
-            handle      TEXT,
-            updated_at  TIMESTAMPTZ DEFAULT NOW()
-        )
-    """, [])
-    # Seed one row per platform so UI always has something to show
-    for p in ("linkedin", "tiktok", "facebook", "instagram"):
-        execute_sql("""
-            INSERT INTO social_media_accounts (platform)
-            VALUES (%s)
-            ON CONFLICT (platform) DO NOTHING
-        """, [p])
-    # Remove legacy twitter row (replaced by tiktok)
-    execute_sql("DELETE FROM social_media_accounts WHERE platform = 'twitter'", [])
+# ── Per-brand platform rows ──────────────────────────────────────────────────
 
-try:
-    _ensure_table()
-except Exception:
-    pass
+def _seed_platforms() -> None:
+    """Make sure the ACTIVE brand has one row per platform (so the UI always
+    has something to show), and drop its legacy twitter row (replaced by
+    tiktok). Idempotent; never touches another brand's rows."""
+    brand_id = require_brand()
+    execute_sql(
+        """
+        INSERT INTO social_media_accounts (brand_id, platform)
+        SELECT %s, p FROM unnest(%s::text[]) AS p
+        ON CONFLICT (brand_id, platform) DO NOTHING
+        """,
+        [brand_id, list(PLATFORMS)],
+    )
+    execute_sql(
+        "DELETE FROM social_media_accounts WHERE brand_id = %s AND platform = 'twitter'",
+        [brand_id],
+    )
 
 
 # ── Models ────────────────────────────────────────────────────────────────────
@@ -72,8 +74,8 @@ class PostRequest(BaseModel):
 
 def _get_creds(platform: str) -> Dict[str, Any]:
     rows = execute_sql(
-        "SELECT credentials, is_connected FROM social_media_accounts WHERE platform = %s",
-        [platform],
+        "SELECT credentials, is_connected FROM social_media_accounts WHERE brand_id = %s AND platform = %s",
+        [require_brand(), platform],
     )
     if not rows:
         raise HTTPException(status_code=404, detail=f"No account found for {platform}")
@@ -86,20 +88,23 @@ def _get_creds(platform: str) -> Dict[str, Any]:
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/")
-async def list_accounts():
-    """Return connection status for all platforms."""
+async def list_accounts(current_user: dict = Depends(require_permission("social.view"))):
+    """Return connection status for all platforms (active brand)."""
+    _seed_platforms()
     rows = execute_sql(
-        "SELECT platform, is_connected, handle, updated_at FROM social_media_accounts ORDER BY platform",
-        [],
+        "SELECT platform, is_connected, handle, updated_at FROM social_media_accounts "
+        "WHERE brand_id = %s ORDER BY platform",
+        [require_brand()],
     )
     return {"accounts": rows or []}
 
 
 @router.get("/{platform}")
-async def get_account(platform: str):
+async def get_account(platform: str, current_user: dict = Depends(require_permission("social.view"))):
     rows = execute_sql(
-        "SELECT platform, is_connected, handle, updated_at FROM social_media_accounts WHERE platform = %s",
-        [platform],
+        "SELECT platform, is_connected, handle, updated_at FROM social_media_accounts "
+        "WHERE brand_id = %s AND platform = %s",
+        [require_brand(), platform],
     )
     if not rows:
         raise HTTPException(status_code=404, detail="Account not found")
@@ -107,32 +112,36 @@ async def get_account(platform: str):
 
 
 @router.put("/{platform}")
-async def update_account(platform: str, req: UpdateAccountRequest, _perm: dict = Depends(require_permission("social.manage"))):
-    """Save credentials and mark the account as connected."""
-    VALID = {"linkedin", "tiktok", "facebook", "instagram"}
+async def update_account(platform: str, req: UpdateAccountRequest,
+                         current_user: dict = Depends(require_permission("social.manage"))):
+    """Save credentials and mark the account as connected (active brand)."""
+    VALID = set(PLATFORMS)
     if platform not in VALID:
         raise HTTPException(status_code=400, detail=f"Unknown platform: {platform}")
+    # Upsert: a brand whose platform rows were never seeded still saves.
     execute_sql("""
-        UPDATE social_media_accounts
-        SET credentials = %s, handle = %s, is_connected = TRUE, updated_at = NOW()
-        WHERE platform = %s
-    """, [json.dumps(req.credentials), req.handle, platform])
+        INSERT INTO social_media_accounts (brand_id, platform, credentials, handle, is_connected, updated_at)
+        VALUES (%s, %s, %s, %s, TRUE, NOW())
+        ON CONFLICT (brand_id, platform) DO UPDATE
+        SET credentials = EXCLUDED.credentials, handle = EXCLUDED.handle,
+            is_connected = TRUE, updated_at = NOW()
+    """, [require_brand(), platform, json.dumps(req.credentials), req.handle])
     return {"success": True, "platform": platform, "handle": req.handle}
 
 
 @router.delete("/{platform}/disconnect")
-async def disconnect(platform: str, _perm: dict = Depends(require_permission("social.manage"))):
-    """Clear credentials and mark disconnected."""
+async def disconnect(platform: str, current_user: dict = Depends(require_permission("social.manage"))):
+    """Clear credentials and mark disconnected (active brand)."""
     execute_sql("""
         UPDATE social_media_accounts
         SET credentials = '{}', is_connected = FALSE, handle = NULL, updated_at = NOW()
-        WHERE platform = %s
-    """, [platform])
+        WHERE brand_id = %s AND platform = %s
+    """, [require_brand(), platform])
     return {"success": True}
 
 
 @router.post("/{platform}/test")
-async def test_connection(platform: str, _perm: dict = Depends(require_permission("social.manage"))):
+async def test_connection(platform: str, current_user: dict = Depends(require_permission("social.manage"))):
     """Quick API call to verify the stored credentials work."""
     creds = _get_creds(platform)
     try:
@@ -195,7 +204,7 @@ async def test_connection(platform: str, _perm: dict = Depends(require_permissio
 
 
 @router.post("/post")
-async def post_to_platform(req: PostRequest, _perm: dict = Depends(require_permission("social.manage"))):
+async def post_to_platform(req: PostRequest, current_user: dict = Depends(require_permission("social.manage"))):
     """Post content to the specified social media platform."""
     platform = req.platform.lower()
     creds = _get_creds(platform)
@@ -300,8 +309,9 @@ async def post_to_platform(req: PostRequest, _perm: dict = Depends(require_permi
         # Mark the draft as posted if a post_id was given
         if req.post_id:
             execute_sql(
-                "UPDATE social_media_posts SET status = 'posted', updated_at = NOW() WHERE id = %s",
-                [req.post_id],
+                "UPDATE social_media_posts SET status = 'posted', updated_at = NOW() "
+                "WHERE brand_id = %s AND id = %s",
+                [require_brand(), req.post_id],
             )
 
         return {"success": True, "platform": platform, **result}

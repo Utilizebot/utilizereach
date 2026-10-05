@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import {
   Trophy, Sparkles, RefreshCw, Loader2, Users, Zap, Eye, ChevronRight, AlertCircle, X, MousePointerClick,
+  UserCircle, Briefcase, Check,
 } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
@@ -10,6 +11,8 @@ interface Perf {
   accounts: { from_email: string; sent: number; open_rate: number; reply_rate: number }[];
   subjects: { subject: string; sent: number; open_rate: number }[];
   segments: { segment: string; sent: number; open_rate: number; reply_rate: number }[];
+  by_owner?: { owner: string; sent: number; open_rate: number; reply_rate: number }[];
+  by_account_manager?: { account_manager: string; sent: number; open_rate: number; reply_rate: number }[];
   overall: { sent?: number; open_rate?: number; reply_rate?: number; bounce_rate?: number };
 }
 interface Rec { title: string; detail: string; impact: string }
@@ -26,7 +29,7 @@ const impactStyle: Record<string, { bar: string; chip: string; label: string }> 
   medium: { bar: 'bg-blue-500', chip: 'bg-blue-100 text-blue-700', label: 'Medium' },
   low: { bar: 'bg-gray-300', chip: 'bg-gray-100 text-gray-500', label: 'Low' },
 };
-const dimLabel: Record<string, string> = { type: 'Email type', account: 'Sender persona', subject: 'Subject line', segment: 'Segment', status: 'Delivery status' };
+const dimLabel: Record<string, string> = { type: 'Email type', account: 'Sender persona', subject: 'Subject line', segment: 'Segment', status: 'Delivery status', owner: 'Lead owner', am: 'Account manager' };
 
 export function WhatsWinning() {
   const [perf, setPerf] = useState<Perf | null>(null);
@@ -218,10 +221,124 @@ export function WhatsWinning() {
               ))}
             </div>
           </div>
+
+          {/* ATTRIBUTION — who owns the wins */}
+          {((perf.by_owner?.length || 0) > 0 || (perf.by_account_manager?.length || 0) > 0) && (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mt-5">
+              {(perf.by_owner?.length || 0) > 0 && (
+                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="flex items-center gap-2"><UserCircle className="h-4 w-4 text-purple-600" /><h2 className="font-bold text-gray-900">Best lead owner</h2></div>
+                    {hint}
+                  </div>
+                  <p className="text-xs text-gray-500 mb-4">Whose leads convert — the card collector / rep behind the lead.</p>
+                  <OwnerBars rows={(perf.by_owner || []).map((r) => ({ key: r.owner, ...r }))} tone="purple" onPick={(v, l) => setDrill({ dim: 'owner', value: v, label: l })} />
+                </div>
+              )}
+              {(perf.by_account_manager?.length || 0) > 0 && (
+                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="flex items-center gap-2"><Briefcase className="h-4 w-4 text-indigo-600" /><h2 className="font-bold text-gray-900">Best account manager</h2></div>
+                    {hint}
+                  </div>
+                  <p className="text-xs text-gray-500 mb-4">Which campaign owner's outreach is winning.</p>
+                  <OwnerBars rows={(perf.by_account_manager || []).map((r) => ({ key: r.account_manager, ...r }))} tone="indigo" onPick={(v, l) => setDrill({ dim: 'am', value: v, label: l })} />
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ASSIGN OWNERS — tag a segment's leads to a person */}
+          <OwnerAssigner onDone={() => fetch(`${API_BASE}/api/insights/performance`, { cache: 'no-store' }).then((r) => r.json()).then(setPerf).catch(() => {})} />
         </>
       )}
 
       {drill && <DrillModal key={drill.dim + drill.value} drill={drill} onClose={() => setDrill(null)} />}
+    </div>
+  );
+}
+
+function OwnerBars({ rows, tone, onPick }: { rows: { key: string; sent: number; open_rate: number; reply_rate: number }[]; tone: 'purple' | 'indigo'; onPick: (v: string, l: string) => void }) {
+  const max = Math.max(70, ...rows.map((r) => r.open_rate));
+  const bar = tone === 'purple' ? 'from-purple-400 to-purple-600' : 'from-indigo-400 to-indigo-600';
+  const pretty = (s: string) => s.replace(/[_-]+/g, ' ');
+  return (
+    <div className="flex flex-col gap-1">
+      {rows.map((r, i) => (
+        <button key={r.key} onClick={() => onPick(r.key, pretty(r.key))}
+          className="grid grid-cols-[20px_1fr_44px] items-center gap-2.5 text-left rounded-lg -mx-1.5 px-1.5 py-1.5 hover:bg-gray-50 transition-colors">
+          <div className={`font-bold tabular-nums text-sm ${i === 0 ? 'text-amber-500' : 'text-gray-300'}`}>{i + 1}</div>
+          <div>
+            <div className="text-[13px] font-semibold text-gray-800 capitalize">{pretty(r.key)}
+              {r.reply_rate > 0 && <span className="text-[11px] text-gray-400 font-medium ml-1.5">{r.reply_rate}% reply</span>}
+              <span className="text-[11px] text-gray-400 font-medium ml-1.5">· {r.sent} sent</span></div>
+            <div className="h-2 rounded-full bg-gray-100 overflow-hidden mt-1">
+              <div className={`h-full rounded-full bg-gradient-to-r ${bar} transition-all duration-700`} style={{ width: `${(r.open_rate / max) * 100}%` }} />
+            </div>
+          </div>
+          <div className="text-right font-bold tabular-nums text-[13px] text-gray-900">{r.open_rate}%</div>
+        </button>
+      ))}
+      {rows.length === 0 && <p className="text-sm text-gray-400 py-2">No attributed sends yet.</p>}
+    </div>
+  );
+}
+
+function OwnerAssigner({ onDone }: { onDone: () => void }) {
+  const [segs, setSegs] = useState<{ segment: string; owner: string | null; leads: number }[]>([]);
+  const [seg, setSeg] = useState('');
+  const [owner, setOwner] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+
+  const load = () => fetch(`${API_BASE}/api/insights/segments`, { cache: 'no-store' })
+    .then((r) => r.json()).then((d) => setSegs(d.segments || [])).catch(() => {});
+  useEffect(() => { load(); }, []);
+
+  const assign = async () => {
+    if (!seg || !owner.trim()) return;
+    setBusy(true); setMsg('');
+    try {
+      const r = await fetch(`${API_BASE}/api/insights/assign-owner`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ owner: owner.trim(), segment: seg }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || 'Failed');
+      setMsg(`Tagged ${d.updated} lead${d.updated === 1 ? '' : 's'} in "${seg}" to ${owner.trim()}.`);
+      setOwner('');
+      load(); onDone();
+    } catch (e: any) { setMsg(e.message || 'Could not assign.'); }
+    setBusy(false);
+  };
+
+  const cur = segs.find((s) => s.segment === seg);
+  return (
+    <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 mt-5">
+      <div className="flex items-center gap-2 mb-1"><UserCircle className="h-4 w-4 text-purple-600" /><h2 className="font-bold text-gray-900">Assign lead owners</h2></div>
+      <p className="text-xs text-gray-500 mb-4">Tag a segment's leads to the person who owns them (e.g. the card collector). New sends to those leads carry the owner into the UTM, so attribution shows up above and in GA4.</p>
+      <div className="flex flex-wrap items-end gap-3">
+        <div className="flex-1 min-w-[200px]">
+          <label className="block text-xs font-semibold text-gray-600 mb-1">Segment</label>
+          <select value={seg} onChange={(e) => setSeg(e.target.value)}
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 bg-white">
+            <option value="">Choose a segment…</option>
+            {segs.map((s) => (
+              <option key={s.segment} value={s.segment}>{s.segment} ({s.leads} leads{s.owner ? ` · owner: ${s.owner}` : ''})</option>
+            ))}
+          </select>
+        </div>
+        <div className="flex-1 min-w-[180px]">
+          <label className="block text-xs font-semibold text-gray-600 mb-1">Owner</label>
+          <input value={owner} onChange={(e) => setOwner(e.target.value)} placeholder={cur?.owner || 'who owns these leads'}
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500" />
+        </div>
+        <button onClick={assign} disabled={busy || !seg || !owner.trim()}
+          className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-purple-600 text-white text-sm font-semibold hover:bg-purple-700 disabled:opacity-40">
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} Assign
+        </button>
+      </div>
+      {msg && <p className="text-xs text-gray-600 mt-3 flex items-center gap-1.5"><Check className="h-3.5 w-3.5 text-emerald-500" /> {msg}</p>}
     </div>
   );
 }

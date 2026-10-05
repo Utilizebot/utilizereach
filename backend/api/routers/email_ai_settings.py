@@ -1,15 +1,28 @@
 """
 Email AI Settings Router
 API endpoints for managing AI email generation settings
+
+Multi-brand: email_ai_settings holds ONE row per brand (unique brand_id).
+Every endpoint runs in an authenticated request, so the query-builder
+`.limit(1)` reads below are already scoped to the active brand. When the
+active brand has no row yet one is created from safe defaults - another
+brand's row is never read.
+
+The stored `ai_api_key` is only returned in full to callers holding
+settings.manage (the only role that can change or test it); everyone else
+gets a masked value such as "••••1234" under the same key name.
 """
 
 from fastapi import APIRouter, HTTPException, Depends
-
-from api.dependencies import require_permission
 from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
 from database.client import get_supabase_admin_client
+from database.pg import execute_sql
+from database import brands as brand_catalog
+from database import tenancy
+from api.dependencies import require_permission
+from api.permissions import has_permission_for
 
 router = APIRouter(prefix="/api/email-ai-settings", tags=["Email AI Settings"])
 
@@ -111,8 +124,74 @@ Write as if you personally researched {lead_company} and are genuinely reaching 
 }
 
 
+def _brand_defaults() -> dict:
+    """Safe defaults for the ACTIVE brand's settings row.
+
+    Brand 1 gets DEFAULT_SETTINGS exactly as before. Other brands get the same
+    generic defaults with their own company name / tagline / website filled in
+    from the brand catalog (never another brand's values).
+    """
+    defaults = dict(DEFAULT_SETTINGS)
+    brand_id = tenancy.require_brand()
+    if brand_catalog.is_default_brand(brand_id):
+        return defaults
+    brand = brand_catalog.get_brand(brand_id) or {}
+    company = (brand.get("branding") or {}).get("company") or {}
+    if not isinstance(company, dict):
+        company = {}
+    name = company.get("name") or brand.get("display_name")
+    if name:
+        defaults["company_name"] = str(name)[:255]
+    if company.get("tagline"):
+        defaults["company_tagline"] = company["tagline"]
+    website = company.get("website") or (
+        f"https://{brand['website_domain']}" if brand.get("website_domain") else None
+    )
+    if website:
+        defaults["cta_link_2_url"] = str(website)[:500]
+    return defaults
+
+
+def _create_settings_row() -> Optional[dict]:
+    """Create the active brand's settings row (race-safe: one row per brand)."""
+    brand_id = tenancy.require_brand()
+    defaults = _brand_defaults()
+    cols = list(defaults.keys())
+    rows = execute_sql(
+        f"INSERT INTO email_ai_settings (brand_id, {', '.join(cols)}) "
+        f"VALUES (%s, {', '.join(['%s'] * len(cols))}) "
+        "ON CONFLICT (brand_id) DO NOTHING RETURNING *",
+        [brand_id] + [defaults[c] for c in cols],
+    )
+    if rows:
+        return rows[0]
+    # Lost a race with a concurrent creator: read the row that won.
+    result = get_supabase().table('email_ai_settings').select('*').limit(1).execute()
+    return result.data[0] if result.data else None
+
+
+def _mask_secret(value) -> str:
+    """'sk-abc...1234' -> '••••1234' (empty stays empty; short keys fully masked)."""
+    v = str(value or "")
+    if not v:
+        return ""
+    return "••••" + (v[-4:] if len(v) > 8 else "")
+
+
+def _for_caller(settings: dict, current_user: dict) -> dict:
+    """Settings as the caller may see them: ai_api_key masked unless the
+    caller holds settings.manage."""
+    if not isinstance(settings, dict) or "ai_api_key" not in settings:
+        return settings
+    if has_permission_for(current_user, "settings.manage"):
+        return settings
+    out = dict(settings)
+    out["ai_api_key"] = _mask_secret(out.get("ai_api_key"))
+    return out
+
+
 @router.get("")
-async def get_email_ai_settings():
+async def get_email_ai_settings(current_user: dict = Depends(require_permission("settings.view"))):
     """
     Get current email AI settings
 
@@ -127,19 +206,19 @@ async def get_email_ai_settings():
         result = supabase.table('email_ai_settings').select('*').limit(1).execute()
 
         if not result.data:
-            # Create default settings if none exist
-            insert_result = supabase.table('email_ai_settings').insert(DEFAULT_SETTINGS).execute()
-            if insert_result.data:
-                return insert_result.data[0]
-            return DEFAULT_SETTINGS
+            # Create default settings for this brand if none exist
+            created = _create_settings_row()
+            if created:
+                return _for_caller(created, current_user)
+            return _for_caller(_brand_defaults(), current_user)
 
-        return result.data[0]
+        return _for_caller(result.data[0], current_user)
 
     except Exception as e:
         # If table doesn't exist, return defaults (user needs to run migration)
         if 'does not exist' in str(e).lower() or 'relation' in str(e).lower():
             return {
-                **DEFAULT_SETTINGS,
+                **_for_caller(dict(DEFAULT_SETTINGS), current_user),
                 'id': None,
                 'error': 'Table not found. Please run the migration: backend/migrations/add_email_ai_settings.sql',
                 'created_at': None,
@@ -149,9 +228,10 @@ async def get_email_ai_settings():
 
 
 @router.put("")
-async def update_email_ai_settings(settings: EmailAISettingsUpdate, _perm: dict = Depends(require_permission("settings.manage"))):
+async def update_email_ai_settings(settings: EmailAISettingsUpdate,
+                                   current_user: dict = Depends(require_permission("settings.manage"))):
     """
-    Update email AI settings (Admin only - checked in frontend)
+    Update the active brand's email AI settings (settings.manage)
 
     Allowed updates:
     - company_name: Your company name
@@ -170,11 +250,11 @@ async def update_email_ai_settings(settings: EmailAISettingsUpdate, _perm: dict 
         current = supabase.table('email_ai_settings').select('*').limit(1).execute()
 
         if not current.data:
-            # Create settings first if they don't exist
-            insert_result = supabase.table('email_ai_settings').insert(DEFAULT_SETTINGS).execute()
-            if not insert_result.data:
+            # Create this brand's settings first if they don't exist
+            created = _create_settings_row()
+            if not created:
                 raise HTTPException(status_code=500, detail="Failed to create default settings")
-            current_id = insert_result.data[0]['id']
+            current_id = created['id']
         else:
             current_id = current.data[0]['id']
 
@@ -245,9 +325,9 @@ async def update_email_ai_settings(settings: EmailAISettingsUpdate, _perm: dict 
 
 
 @router.post("/reset")
-async def reset_email_ai_settings(_perm: dict = Depends(require_permission("settings.manage"))):
+async def reset_email_ai_settings(current_user: dict = Depends(require_permission("settings.manage"))):
     """
-    Reset email AI settings to defaults (Admin only)
+    Reset the active brand's email AI settings to defaults (settings.manage)
 
     This will reset all settings to their default values.
     Useful if the user wants to start fresh.
@@ -260,16 +340,16 @@ async def reset_email_ai_settings(_perm: dict = Depends(require_permission("sett
 
         if not current.data:
             # Create default settings
-            result = supabase.table('email_ai_settings').insert(DEFAULT_SETTINGS).execute()
+            created = _create_settings_row()
             return {
                 'success': True,
                 'message': 'Default settings created',
-                'settings': result.data[0] if result.data else DEFAULT_SETTINGS
+                'settings': created if created else _brand_defaults()
             }
 
         # Reset to defaults
         reset_data = {
-            **DEFAULT_SETTINGS,
+            **_brand_defaults(),
             'updated_at': datetime.utcnow().isoformat()
         }
 
@@ -290,7 +370,8 @@ async def preview_email_prompt(
     lead_name: str = "John Smith",
     lead_company: str = "Acme Corporation",
     lead_title: str = "Operations Manager",
-    lead_industry: str = "Manufacturing"
+    lead_industry: str = "Manufacturing",
+    current_user: dict = Depends(require_permission("settings.view")),
 ):
     """
     Preview how the AI prompt will look with sample lead data
@@ -303,7 +384,7 @@ async def preview_email_prompt(
         result = supabase.table('email_ai_settings').select('*').limit(1).execute()
 
         if not result.data:
-            settings = DEFAULT_SETTINGS
+            settings = _brand_defaults()
         else:
             settings = result.data[0]
 
@@ -360,10 +441,11 @@ class ProviderTestRequest(BaseModel):
 
 
 @router.post("/test-provider")
-async def test_ai_provider(request: ProviderTestRequest, _perm: dict = Depends(require_permission("settings.manage"))):
+async def test_ai_provider(request: ProviderTestRequest,
+                           current_user: dict = Depends(require_permission("settings.manage"))):
     """
     Test an AI provider configuration with a tiny round-trip generation.
-    Fields left empty fall back to the saved settings / environment.
+    Fields left empty fall back to the active brand's saved settings / environment.
     """
     import time
     from integrations.llm_client import LLMClient, get_llm_client

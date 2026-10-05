@@ -32,9 +32,11 @@ import {
   Send as SendIcon,
   ChevronLeft,
   ChevronRight,
+  Phone,
 } from 'lucide-react';
 
 import { EmailDetailModal } from '../components/EmailDetailModal';
+import { useAuth } from '../hooks/useAuth';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 
@@ -59,6 +61,7 @@ interface SentEmail {
   id: string;
   recipient_email: string;
   recipient_name: string;
+  phone?: string | null;
   subject: string;
   sent_at: string;
   opened_at: string | null;
@@ -67,6 +70,7 @@ interface SentEmail {
   bounced_at?: string | null;
   status: string;
   campaign_id: string | null;
+  variant?: string | null;
   opens: number;
   clicks: number;
 }
@@ -94,6 +98,8 @@ interface TestEmailResult {
 }
 
 export function Emails() {
+  const { can } = useAuth();
+  const canSend = can('emails.send');
   const [stats, setStats] = useState<EmailStats | null>(null);
   const [emails, setEmails] = useState<SentEmail[]>([]);
   const [performance, setPerformance] = useState<PerformancePoint[]>([]);
@@ -116,6 +122,7 @@ export function Emails() {
 
   // Email detail modal
   const [detailId, setDetailId] = useState<string | null>(null);
+  const [fuDrill, setFuDrill] = useState<{ label: string; kind: string } | null>(null);
 
   // Search + status + period filters + pagination
   const [search, setSearch] = useState('');
@@ -124,6 +131,7 @@ export function Emails() {
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
+  const [phoneOnly, setPhoneOnly] = useState(false);
   const pageSize = 20;
 
   const fmtDay = (d: Date) =>
@@ -169,20 +177,69 @@ export function Emails() {
     if (g.replied) counts.replied++;
     if (g.bounced) counts.bounced++;
   }
+
+  // Follow-up sequence breakdown (period-aware): F1/F2/F3 are follow-up touches
+  const fu = { intro: 0, f1: 0, f2: 0, f3: 0, total: 0, opened: 0 };
+  for (const e of periodEmails) {
+    const v = e.variant || '';
+    if (v.startsWith('F')) {
+      fu.total++;
+      if (engagementOf(e).opened) fu.opened++;
+      if (v === 'F1') fu.f1++; else if (v === 'F2') fu.f2++; else if (v === 'F3') fu.f3++;
+    } else {
+      fu.intro++;
+    }
+  }
+  const fuOpenRate = fu.total ? Math.round((fu.opened / fu.total) * 100) : 0;
+  const fuMatches = fuDrill
+    ? periodEmails.filter((e) => { const v = e.variant || ''; return fuDrill.kind === 'initial' ? !v.startsWith('F') : v === fuDrill.kind; })
+    : [];
   const pctOf = (n: number) => (counts.all ? Math.round((n / counts.all) * 100) : 0);
 
   const q = search.trim().toLowerCase();
   const byFilter = filter === 'all' ? periodEmails : periodEmails.filter((e) => engagementOf(e)[filter]);
+  const byPhone = phoneOnly ? byFilter.filter((e) => !!e.phone) : byFilter;
   const filteredEmails = q
-    ? byFilter.filter((e) =>
+    ? byPhone.filter((e) =>
         (e.recipient_email || '').toLowerCase().includes(q) ||
         (e.recipient_name || '').toLowerCase().includes(q) ||
         (e.subject || '').toLowerCase().includes(q))
-    : byFilter;
+    : byPhone;
   const totalPages = Math.max(1, Math.ceil(filteredEmails.length / pageSize));
   const safePage = Math.min(currentPage, totalPages);
   const pageStart = (safePage - 1) * pageSize;
   const paginatedEmails = filteredEmails.slice(pageStart, pageStart + pageSize);
+
+  const handleExtract = () => {
+    const esc = (v: string | null | undefined) => {
+      if (v == null) return '';
+      const s = String(v);
+      return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const headers = ['Name', 'Email', 'Phone', 'Subject', 'Status', 'Opens', 'Clicks', 'Sent At', 'Opened At', 'Clicked At', 'Replied At', 'Bounced At'];
+    const rows = filteredEmails.map((e) => [
+      esc(e.recipient_name),
+      esc(e.recipient_email),
+      esc(e.phone),
+      esc(e.subject),
+      esc(e.status),
+      esc(String(e.opens ?? 0)),
+      esc(String(e.clicks ?? 0)),
+      esc(e.sent_at ? new Date(e.sent_at).toLocaleString() : ''),
+      esc(e.opened_at ? new Date(e.opened_at).toLocaleString() : ''),
+      esc(e.clicked_at ? new Date(e.clicked_at).toLocaleString() : ''),
+      esc(e.replied_at ? new Date(e.replied_at).toLocaleString() : ''),
+      esc(e.bounced_at ? new Date(e.bounced_at).toLocaleString() : ''),
+    ].join(','));
+    const csv = [headers.join(','), ...rows].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `sent-emails-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   const fetchData = async () => {
     try {
@@ -386,6 +443,7 @@ export function Emails() {
           </div>
 
           <div className="flex items-center gap-3">
+            {canSend && (
             <button
               onClick={() => { setShowTestEmail(!showTestEmail); setTestResult(null); setTestError(null); if (showTestEmail) resetTestPanel(); }}
               className={`flex items-center gap-2 px-4 py-2 rounded-xl font-medium text-sm transition-all shadow-sm ${
@@ -398,6 +456,7 @@ export function Emails() {
               <span>AI Test Email</span>
               <ChevronDown className={`h-3.5 w-3.5 transition-transform ${showTestEmail ? 'rotate-180' : ''}`} />
             </button>
+            )}
 
             <button
               onClick={fetchData}
@@ -418,7 +477,7 @@ export function Emails() {
 
       {/* AI Test Email Panel */}
       <AnimatePresence>
-        {showTestEmail && (
+        {showTestEmail && canSend && (
           <motion.div
             initial={{ opacity: 0, height: 0, marginBottom: 0 }}
             animate={{ opacity: 1, height: 'auto', marginBottom: 32 }}
@@ -563,7 +622,7 @@ export function Emails() {
                       <div className="flex items-center gap-3">
                         <button
                           onClick={sendTestEmail}
-                          disabled={testSending || !editSubject.trim()}
+                          disabled={testSending || !editSubject.trim() || !canSend}
                           className={`flex items-center gap-2 px-6 py-3 rounded-xl font-semibold text-sm transition-all ${
                             testSending || !editSubject.trim()
                               ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
@@ -695,13 +754,74 @@ export function Emails() {
 
       {/* Period-aware KPI cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-6 mb-6">
-        <StatCard title="Total Sent" value={counts.all} subtitle={`Sent today: ${stats.sent_today}`} icon={Mail} gradient="from-purple-500 to-purple-600" delay={0} />
-        <StatCard title="Delivered" value={delivered} subtitle={`${bounceRate}% bounced`} icon={Send} gradient="from-blue-500 to-blue-600" delay={0.05} />
-        <StatCard title="Open Rate" value={`${openRate}%`} subtitle={openRate >= 25 ? 'Above average' : 'Below average'} icon={Eye} gradient="from-amber-500 to-amber-600" delay={0.1} trend={openRate >= 25 ? 'up' : 'down'} />
-        <StatCard title="Click Rate" value={`${clickRate}%`} subtitle={`${counts.clicked} clicked`} icon={MousePointerClick} gradient="from-cyan-500 to-blue-600" delay={0.15} />
-        <StatCard title="Reply Rate" value={`${replyRate}%`} subtitle={replyRate >= 5 ? 'Excellent' : 'Good'} icon={MessageCircle} gradient="from-emerald-500 to-emerald-600" delay={0.2} trend={replyRate >= 5 ? 'up' : 'down'} />
-        <StatCard title="Bounce Rate" value={`${bounceRate}%`} subtitle={`${counts.bounced} bounced`} icon={AlertTriangle} gradient="from-orange-500 to-red-600" delay={0.25} trend={bounceRate <= 2 ? 'up' : 'down'} />
+        <StatCard title="Total Sent" value={counts.all} subtitle={`Sent today: ${stats.sent_today}`} icon={Mail} gradient="from-purple-500 to-purple-600" delay={0} onClick={() => { setFilter('all'); setCurrentPage(1); }} />
+        <StatCard title="Delivered" value={delivered} subtitle={`${bounceRate}% bounced`} icon={Send} gradient="from-blue-500 to-blue-600" delay={0.05} onClick={() => { setFilter('all'); setCurrentPage(1); }} />
+        <StatCard title="Open Rate" value={`${openRate}%`} subtitle={openRate >= 25 ? 'Above average' : 'Below average'} icon={Eye} gradient="from-amber-500 to-amber-600" delay={0.1} trend={openRate >= 25 ? 'up' : 'down'} onClick={() => { setFilter('opened'); setCurrentPage(1); }} />
+        <StatCard title="Click Rate" value={`${clickRate}%`} subtitle={`${counts.clicked} clicked`} icon={MousePointerClick} gradient="from-cyan-500 to-blue-600" delay={0.15} onClick={() => { setFilter('clicked'); setCurrentPage(1); }} />
+        <StatCard title="Reply Rate" value={`${replyRate}%`} subtitle={replyRate >= 5 ? 'Excellent' : 'Good'} icon={MessageCircle} gradient="from-emerald-500 to-emerald-600" delay={0.2} trend={replyRate >= 5 ? 'up' : 'down'} onClick={() => { setFilter('replied'); setCurrentPage(1); }} />
+        <StatCard title="Bounce Rate" value={`${bounceRate}%`} subtitle={`${counts.bounced} bounced`} icon={AlertTriangle} gradient="from-orange-500 to-red-600" delay={0.25} trend={bounceRate <= 2 ? 'up' : 'down'} onClick={() => { setFilter('bounced'); setCurrentPage(1); }} />
       </div>
+
+      {/* Follow-up sequence — period-aware */}
+      <motion.div className="bg-white rounded-2xl shadow-lg border border-gray-200 p-5 mb-6"
+        initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
+        <div className="flex items-center gap-2.5 mb-4">
+          <div className="h-9 w-9 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow"><Clock className="h-5 w-5 text-white" /></div>
+          <div>
+            <h3 className="font-bold text-gray-900">Follow-up sequence</h3>
+            <p className="text-xs text-gray-500"><b className="text-indigo-600">{fu.total}</b> follow-up{fu.total === 1 ? '' : 's'} sent · <b>{fuOpenRate}%</b> opened · gated to engaged contacts</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 overflow-x-auto pb-1">
+          {([['Initial', 'initial', fu.intro, 'from-blue-500 to-blue-600'], ['Follow-up 1', 'F1', fu.f1, 'from-amber-500 to-amber-600'], ['Follow-up 2', 'F2', fu.f2, 'from-amber-500 to-orange-600'], ['Follow-up 3', 'F3', fu.f3, 'from-orange-500 to-red-500']] as const).map(([label, kind, val, grad], i) => (
+            <div key={label} className="flex items-center gap-2 flex-none">
+              {i > 0 && <ChevronRight className="h-4 w-4 text-gray-300" />}
+              <button onClick={() => setFuDrill({ label, kind })}
+                className="rounded-xl border border-gray-200 px-5 py-3 text-center min-w-[96px] hover:border-indigo-300 hover:bg-indigo-50/40 transition-colors cursor-pointer">
+                <div className={`text-2xl font-bold tabular-nums bg-gradient-to-r ${grad} bg-clip-text text-transparent`}>{val}</div>
+                <div className="text-[11px] text-gray-500 font-semibold mt-0.5">{label}</div>
+              </button>
+            </div>
+          ))}
+        </div>
+      </motion.div>
+
+      {/* Follow-up stage drilldown */}
+      {fuDrill && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 backdrop-blur-sm p-4 sm:p-8" onClick={() => setFuDrill(null)}>
+          <div className="w-full max-w-2xl bg-white rounded-2xl shadow-2xl my-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-5 border-b border-gray-100">
+              <div>
+                <div className="text-[11px] uppercase tracking-wide text-gray-400 font-bold">Follow-up stage</div>
+                <h3 className="font-bold text-gray-900 text-lg">{fuDrill.label} · {fuMatches.length} email{fuMatches.length === 1 ? '' : 's'}</h3>
+              </div>
+              <button onClick={() => setFuDrill(null)} className="p-2 rounded-lg hover:bg-gray-100 text-gray-400"><XCircle className="h-5 w-5" /></button>
+            </div>
+            <div className="p-5 max-h-[62vh] overflow-y-auto space-y-2">
+              {fuMatches.length === 0 ? (
+                <p className="text-sm text-gray-400 text-center py-8">No emails at this stage yet{period !== 'all' ? ' in this period' : ''}.</p>
+              ) : fuMatches.slice(0, 100).map((e) => {
+                const g = engagementOf(e);
+                return (
+                  <button key={e.id} onClick={() => { setDetailId(e.id); setFuDrill(null); }}
+                    className="w-full text-left border border-gray-200 rounded-xl p-3 hover:bg-gray-50 transition-colors flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="font-semibold text-sm text-gray-900 truncate">{e.subject || '(no subject)'}</div>
+                      <div className="text-xs text-gray-400 mt-0.5 truncate">{e.recipient_name || e.recipient_email}</div>
+                    </div>
+                    <div className="flex gap-1 flex-none">
+                      {g.opened && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700">Opened</span>}
+                      {g.replied && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700">Replied</span>}
+                      {g.bounced && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-red-100 text-red-700">Bounced</span>}
+                    </div>
+                  </button>
+                );
+              })}
+              {fuMatches.length > 100 && <p className="text-xs text-gray-400 text-center pt-2">Showing first 100 of {fuMatches.length}.</p>}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Deliverability callout — reconciles post-send bounces + pre-send rejects */}
       <motion.div
@@ -936,11 +1056,35 @@ export function Emails() {
                 </button>
               );
             })}
-            {filter !== 'all' && (
-              <button onClick={() => { setFilter('all'); setCurrentPage(1); }} className="text-xs font-medium text-emerald-600 hover:underline ml-1">
-                Clear filter · show all
+            <button
+              onClick={() => { setPhoneOnly(p => !p); setCurrentPage(1); }}
+              className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm transition-all ${
+                phoneOnly
+                  ? 'bg-teal-600 border-transparent text-white shadow-md'
+                  : 'bg-teal-50 border-teal-100 text-teal-700 hover:shadow-sm'
+              }`}
+            >
+              <Phone className="h-4 w-4" />
+              <span className="font-semibold">Has phone</span>
+            </button>
+            {(filter !== 'all' || phoneOnly) && (
+              <button onClick={() => { setFilter('all'); setPhoneOnly(false); setCurrentPage(1); }} className="text-xs font-medium text-emerald-600 hover:underline ml-1">
+                Clear filters
               </button>
             )}
+          </div>
+
+          {/* Extract to Excel */}
+          <div className="mt-3 flex items-center gap-2">
+            <button
+              onClick={handleExtract}
+              disabled={filteredEmails.length === 0}
+              className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              <Download className="h-4 w-4" />
+              Extract to Excel ({filteredEmails.length.toLocaleString()} rows)
+            </button>
+            <span className="text-xs text-gray-400">Downloads the current filtered view as a .csv file</span>
           </div>
         </div>
 
@@ -986,6 +1130,9 @@ export function Emails() {
                         <div>
                           <p className="font-medium text-gray-900">{email.recipient_name || 'Unknown'}</p>
                           <p className="text-sm text-gray-500">{email.recipient_email}</p>
+                          {email.phone && (
+                            <p className="text-xs text-gray-400 mt-0.5">{email.phone}</p>
+                          )}
                         </div>
                       </div>
                     </td>
@@ -1100,12 +1247,14 @@ interface StatCardProps {
   gradient: string;
   delay: number;
   trend?: 'up' | 'down';
+  onClick?: () => void;
 }
 
-function StatCard({ title, value, subtitle, icon: Icon, gradient, delay, trend }: StatCardProps) {
+function StatCard({ title, value, subtitle, icon: Icon, gradient, delay, trend, onClick }: StatCardProps) {
   return (
     <motion.div
-      className="bg-white rounded-2xl shadow-lg border border-gray-200 p-6 relative overflow-hidden group hover:shadow-xl transition-shadow"
+      onClick={onClick}
+      className={`bg-white rounded-2xl shadow-lg border border-gray-200 p-6 relative overflow-hidden group hover:shadow-xl transition-shadow${onClick ? ' cursor-pointer' : ''}`}
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay }}

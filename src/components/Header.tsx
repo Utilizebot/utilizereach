@@ -1,9 +1,11 @@
 import { motion } from 'framer-motion';
 import { getCurrentSessionId } from '../lib/tracking';
-import { useConfig } from '../context/ConfigContext';
+import { usePublicConfig } from '../context/ConfigContext';
 
 export function Header() {
-  const config = useConfig();
+  // Public form header: always the HOST brand (never the logged-in user's
+  // active brand), matching where the form submission is recorded.
+  const config = usePublicConfig();
 
   const handleWebsiteClick = async () => {
     try {

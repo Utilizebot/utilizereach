@@ -164,7 +164,7 @@ export function AgentStream() {
   const connect = useCallback(() => {
     if (esRef.current) esRef.current.close();
 
-    const es = new EventSource(`${API_BASE}/api/stream/agents`);
+    const es = new EventSource(`${API_BASE}/api/stream/agents?token=${encodeURIComponent(localStorage.getItem('auth_token') ?? '')}`); // EventSource can't send headers
     esRef.current = es;
 
     es.onopen = () => setConnected(true);

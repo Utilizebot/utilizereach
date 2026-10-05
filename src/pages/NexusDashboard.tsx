@@ -72,7 +72,7 @@ export function NexusDashboard() {
   }, []);
 
   useEffect(() => {
-    const es = new EventSource('/api/v1/agents/stream');
+    const es = new EventSource(`/api/v1/agents/stream?token=${encodeURIComponent(localStorage.getItem('auth_token') ?? '')}`); // EventSource can't send headers
     es.onmessage = e => {
       try {
         const ev: StreamEvent = JSON.parse(e.data);

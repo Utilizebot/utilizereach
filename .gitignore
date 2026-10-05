@@ -25,6 +25,7 @@ dist-ssr
 
 # Environment variables
 .env
+.env.*
 .env.local
 .env.production
 .env.development
@@ -34,6 +35,13 @@ shared_config/
 # ...but always keep the templates
 !.env.example
 !.env.template
+!**/.env.example
+!**/.env.template
+
+# Runtime secrets / test output
+backend/.jwt_secret
+.jwt_secret
+backend/tests/multibrand/reports/
 
 # Python
 __pycache__/

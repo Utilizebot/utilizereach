@@ -2,9 +2,26 @@
 Setup Router
 API endpoints for initial application setup and configuration
 This router works even when the database is not reachable yet (first-time setup)
+
+Multi-brand:
+  * PUBLIC router (mount WITHOUT the auth dependency): the Setup Wizard runs
+    before any account exists.
+  * /status   - system-level checks only (config file, DB reachable, any admin
+                account). No tenant reads.
+  * /config   - the Host-resolved brand's config.json-shaped payload. Brand 1
+                keeps serving the legacy shared config.json unchanged.
+  * /save     - bootstrap (no admin account exists yet) stays open, exactly as
+                before. Otherwise the caller must be an authenticated PLATFORM
+                admin (it rewrites the deployment-wide .env). Company details go
+                to the ACTIVE brand: brand 1 -> the legacy config.json as before,
+                any other brand -> brands.branding.company. The AI provider
+                choice goes to the active brand's email_ai_settings row.
+  * /test-connection - same rule as /save: open during bootstrap, otherwise
+                an authenticated PLATFORM admin only.
+  * /status and /config stay public (the login page needs branding).
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Header, Request
 from pydantic import BaseModel
 from typing import Optional
 import os
@@ -12,6 +29,9 @@ import re
 import json
 import secrets
 from pathlib import Path
+
+from database.pg import execute_sql
+from database.tenancy import DEFAULT_BRAND_ID, brand_scope
 
 router = APIRouter(prefix="/api/setup", tags=["Setup"])
 
@@ -68,27 +88,50 @@ class SetupStatus(BaseModel):
 def _check_database() -> bool:
     """Return True if SELECT 1 works against the configured Postgres."""
     try:
-        from database.pg import get_pool
-        pool = get_pool()
-        with pool.connection() as conn:
-            conn.execute("SELECT 1")
+        execute_sql("SELECT 1")
         return True
     except Exception:
         return False
 
 
+def _admin_state() -> Optional[bool]:
+    """True/False: whether any login account (global sales_reps) has a
+    password set. None: the database could not be queried."""
+    try:
+        rows = execute_sql("SELECT 1 AS ok FROM sales_reps WHERE password_hash IS NOT NULL LIMIT 1")
+        return bool(rows)
+    except Exception:
+        return None
+
+
 def _check_admin_exists() -> bool:
     """Return True if any sales_reps row has a password set."""
+    return bool(_admin_state())
+
+
+def _legacy_setup_completed() -> bool:
+    """setup.completed flag of the shared (brand 1) config.json."""
     try:
-        from database.pg import get_pool
-        pool = get_pool()
-        with pool.connection() as conn:
-            row = conn.execute(
-                "SELECT 1 FROM sales_reps WHERE password_hash IS NOT NULL LIMIT 1"
-            ).fetchone()
-        return row is not None
+        if CONFIG_JSON_PATH.exists():
+            with open(CONFIG_JSON_PATH, 'r') as f:
+                return bool((json.load(f) or {}).get('setup', {}).get('completed', False))
     except Exception:
-        return False
+        pass
+    return False
+
+
+def _resolve_public_brand(request: Request) -> Optional[dict]:
+    """Host-resolved brand (else brand 1); None when the brand catalog cannot
+    be read (database not reachable yet during first-time setup)."""
+    try:
+        from api.dependencies import public_brand
+        return public_brand(request)
+    except Exception:
+        return None
+
+
+def _is_default(brand: Optional[dict]) -> bool:
+    return brand is None or str(brand.get("id")) == DEFAULT_BRAND_ID
 
 
 @router.get("/status")
@@ -123,12 +166,45 @@ async def get_setup_status() -> SetupStatus:
     )
 
 
+def _brand_config(brand: dict) -> dict:
+    """config.json-shaped payload for a NON-default brand (its brands.branding
+    over neutral defaults; never brand 1's config file)."""
+    try:
+        from api.routers.brands import build_public_config
+        return build_public_config(brand)
+    except ImportError:
+        branding = brand.get("branding") or {}
+        cfg = {
+            "setup": {"completed": True, "apiUrl": ""},
+            "company": {"name": brand.get("display_name", ""), "tagline": "", "logo": "/logo.png",
+                        "website": f"https://{brand['website_domain']}" if brand.get("website_domain") else "",
+                        "email": "", "phone": ""},
+            "branding": {"primaryColor": "#2aa8e0", "secondaryColor": "#0d78b0", "accentColor": "#30b9eb"},
+            "form": {"title": "Request a demo", "subtitle": "", "successMessage": "Thanks! We'll be in touch."},
+            "dashboard": {"title": "Lead Analytics", "subtitle": ""},
+            "emailTeam": [],
+            "features": {"enableScraper": True, "enableScheduler": True,
+                         "enableEmailTracking": True, "enableAIEmails": True},
+        }
+        for key in ("company", "branding", "form", "dashboard", "features"):
+            if isinstance(branding.get(key), dict):
+                cfg[key].update({k: v for k, v in branding[key].items() if v not in (None, "")})
+        if isinstance(branding.get("emailTeam"), list):
+            cfg["emailTeam"] = branding["emailTeam"]
+        return cfg
+
+
 @router.get("/config")
-async def get_config():
+async def get_config(request: Request):
     """
-    Get current config.json content
+    Get the config.json-shaped configuration of the brand that owns this Host
+    (brand 1 / no dedicated host -> the shared config.json, as before).
     Used by frontend to load configuration
     """
+    brand = _resolve_public_brand(request)
+    if not _is_default(brand):
+        return _brand_config(brand)
+
     if not CONFIG_JSON_PATH.exists():
         # Return default config if file doesn't exist
         return {
@@ -174,15 +250,59 @@ async def get_config():
         raise HTTPException(status_code=500, detail=f"Error reading config: {str(e)}")
 
 
+def _is_bootstrap() -> bool:
+    """True while no login account exists yet (or the database is not
+    reachable while first-time setup is still incomplete)."""
+    state = _admin_state()
+    return state is False or (state is None and not _legacy_setup_completed())
+
+
+async def _require_platform_admin(request: Request, authorization: Optional[str]) -> dict:
+    """Authenticated PLATFORM admin (post-bootstrap setup endpoints)."""
+    if not authorization:
+        raise HTTPException(
+            status_code=401,
+            detail="Setup is already complete - sign in as a platform admin to change the configuration.",
+        )
+    from api.dependencies import get_current_user
+    user = await get_current_user(request, authorization)
+    if not user.get("is_platform_admin"):
+        raise HTTPException(status_code=403, detail="Platform admin access required to change the system configuration.")
+    return user
+
+
+async def _authorize_save(request: Request, authorization: Optional[str]) -> str:
+    """Who may run /save, and for which brand. Returns the brand id to write
+    company / AI settings into.
+
+    * Bootstrap - no login account exists yet (or the database is not
+      reachable while first-time setup is still incomplete): open, as before;
+      the Host-resolved brand (brand 1 on a fresh install).
+    * Otherwise: an authenticated PLATFORM admin (the deployment-wide .env is
+      rewritten); the brand their session is acting in.
+    """
+    if _is_bootstrap():
+        brand = _resolve_public_brand(request)
+        return str(brand["id"]) if brand else DEFAULT_BRAND_ID
+
+    user = await _require_platform_admin(request, authorization)
+    return str(user["brand_id"])
+
+
 @router.post("/save")
-async def save_setup(data: SetupData):
+async def save_setup(data: SetupData, request: Request, authorization: Optional[str] = Header(None)):
     """
     Save setup configuration
     Writes:
     - backend config/.env (full config for backend)
     - root .env (best-effort, for docker-compose environment variables)
-    - shared_config/config.json (for frontend)
+    - shared_config/config.json (for frontend; brand 1 only)
+    - the active brand's company details (other brands: brands.branding)
+    - the active brand's AI provider settings (email_ai_settings)
     """
+    brand_id = await _authorize_save(request, authorization)
+    is_default_brand = brand_id == DEFAULT_BRAND_ID
+
     try:
         # Ensure config directories exist
         BACKEND_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -201,14 +321,21 @@ async def save_setup(data: SetupData):
         except Exception as e:
             print(f"Warning: Could not update root .env: {e}")
 
-        # Generate and save config.json
-        config_content = generate_config_json(data)
-        with open(CONFIG_JSON_PATH, 'w') as f:
-            json.dump(config_content, f, indent=2)
+        if is_default_brand:
+            # Brand 1: the shared config.json is its branding source (unchanged)
+            config_content = generate_config_json(data)
+            with open(CONFIG_JSON_PATH, 'w') as f:
+                json.dump(config_content, f, indent=2)
+        else:
+            # Any other brand: company details live on its brands row
+            try:
+                _save_brand_company(brand_id, data)
+            except Exception as e:
+                print(f"Warning: could not save company details to brand {brand_id}: {e}")
 
-        # Persist the AI provider selection into email_ai_settings (DB)
+        # Persist the AI provider selection into the brand's email_ai_settings (DB)
         try:
-            _save_ai_provider_settings(data)
+            _save_ai_provider_settings(data, brand_id)
         except Exception as e:
             print(f"Warning: could not save AI provider settings to database: {e}")
 
@@ -230,15 +357,17 @@ async def save_setup(data: SetupData):
 
 
 @router.post("/test-connection")
-async def test_database_connection():
+async def test_database_connection(request: Request, authorization: Optional[str] = Header(None)):
     """
     Test the Postgres database connection (SELECT 1)
+
+    Open during bootstrap (no admin account yet); afterwards an authenticated
+    platform admin only.
     """
+    if not _is_bootstrap():
+        await _require_platform_admin(request, authorization)
     try:
-        from database.pg import get_pool
-        pool = get_pool()
-        with pool.connection() as conn:
-            conn.execute("SELECT 1")
+        execute_sql("SELECT 1")
         return {"success": True, "message": "Database connection successful"}
     except Exception as e:
         return {"success": False, "message": str(e)}
@@ -251,29 +380,56 @@ def _effective_gemini_key(data: SetupData) -> str:
     return (data.geminiApiKey or "").strip()
 
 
-def _save_ai_provider_settings(data: SetupData) -> None:
-    """Write the wizard's AI provider choice into the email_ai_settings row."""
+def _save_ai_provider_settings(data: SetupData, brand_id: str) -> None:
+    """Write the wizard's AI provider choice into the brand's email_ai_settings row."""
     provider = (data.aiProvider or "gemini").strip().lower()
     api_key = (data.aiApiKey or "").strip()
     if provider == "gemini" and not api_key:
         api_key = (data.geminiApiKey or "").strip()
 
-    from database.pg import get_pool
-    pool = get_pool()
-    with pool.connection() as conn:
-        row = conn.execute("SELECT id FROM email_ai_settings LIMIT 1").fetchone()
-        if row:
-            conn.execute(
-                "UPDATE email_ai_settings SET ai_provider = %s, ai_model = %s, "
-                "ai_api_key = %s, ai_base_url = %s, updated_at = NOW() WHERE id = %s",
-                (provider, data.aiModel or "", api_key, data.aiBaseUrl or "", row["id"]),
+    values = [provider, data.aiModel or "", api_key, data.aiBaseUrl or ""]
+    with brand_scope(brand_id):
+        updated = execute_sql(
+            "UPDATE email_ai_settings SET ai_provider = %s, ai_model = %s, "
+            "ai_api_key = %s, ai_base_url = %s, updated_at = NOW() "
+            "WHERE brand_id = %s RETURNING id",
+            values + [brand_id],
+        )
+        if not updated:
+            execute_sql(
+                "INSERT INTO email_ai_settings (brand_id, ai_provider, ai_model, ai_api_key, ai_base_url) "
+                "VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT (brand_id) DO UPDATE SET ai_provider = EXCLUDED.ai_provider, "
+                "ai_model = EXCLUDED.ai_model, ai_api_key = EXCLUDED.ai_api_key, "
+                "ai_base_url = EXCLUDED.ai_base_url, updated_at = NOW()",
+                [brand_id] + values,
             )
-        else:
-            conn.execute(
-                "INSERT INTO email_ai_settings (ai_provider, ai_model, ai_api_key, ai_base_url) "
-                "VALUES (%s, %s, %s, %s)",
-                (provider, data.aiModel or "", api_key, data.aiBaseUrl or ""),
-            )
+
+
+def _save_brand_company(brand_id: str, data: SetupData) -> None:
+    """Merge the wizard's company details into brands.branding.company of a
+    NON-default brand (the global brands table; only that brand's row)."""
+    fields = {"name": "companyName", "website": "companyWebsite", "email": "companyEmail", "phone": "companyPhone"}
+    placeholders = {
+        f: (SetupData.model_fields[f].default if hasattr(SetupData, "model_fields") else SetupData.__fields__[f].default)
+        for f in fields.values()
+    }
+    company = {}
+    for key, field in fields.items():
+        value = (getattr(data, field) or "").strip()
+        # never overwrite a brand's real details with the wizard's placeholders
+        if value and value != placeholders[field]:
+            company[key] = value
+    if not company:
+        return
+    execute_sql(
+        "UPDATE brands SET branding = jsonb_set(COALESCE(branding, '{}'::jsonb), '{company}', "
+        "COALESCE(branding->'company', '{}'::jsonb) || %s::jsonb, true), updated_at = NOW() "
+        "WHERE id = %s",
+        [json.dumps(company), brand_id],
+    )
+    from database import brands as brand_catalog
+    brand_catalog.invalidate_cache()
 
 
 def get_or_create_jwt_secret() -> str:

@@ -5,14 +5,23 @@ the failed recipient addresses that match our own sent recipients, and with
 APPLY=1: marks sent_emails bounced, adds email_exclusions, and sets the lead
 status to 'invalid' so the sender never retries them.
 
+Multi-brand: runs once per ACTIVE brand that has a mailbox, inside
+brand_scope(brand), against THAT brand's inbox (integrations/brand_mail: brand 1
+= the legacy .gmail_tokens mailbox) and THAT brand's sends only. A hard bounce
+is also added to global_suppression (an invalid mailbox is invalid for every
+brand). Brands without a mailbox are skipped.
+
 Env: APPLY=1 to write changes (default 0 = detect only).
+     BRAND_ID=<id|slug> to process a single brand (default: all active brands).
 """
-import os, sys, re, base64
+import os, sys, re, base64, traceback
 sys.path.insert(0, "/app")
 from database.client import get_supabase_admin_client
 from database.pg import execute_sql
-from api.routers.campaigns import load_gmail_tokens
-from integrations.gmail_client import GmailClient
+from database import tenancy
+from database import brands as brandcat
+from database.tenancy import brand_scope
+from integrations.brand_mail import get_brand_gmail_client, describe_brand_mailbox
 
 APPLY = os.getenv("APPLY", "0") == "1"
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
@@ -31,14 +40,15 @@ def decode_parts(payload):
     walk(payload)
     return txt
 
-def main():
+def run_brand():
+    """Detect (and with APPLY=1 quarantine) hard bounces for the ACTIVE brand."""
+    bid = tenancy.require_brand()
     sb = get_supabase_admin_client()
-    t = load_gmail_tokens()
-    g = GmailClient(email=t.get("GMAIL_EMAIL"), refresh_token=t.get("GMAIL_REFRESH_TOKEN"),
-                    access_token=t.get("GMAIL_ACCESS_TOKEN"))
+    g = get_brand_gmail_client(bid)
 
     # our own sent recipients (lowercased) to match against bounce bodies
-    rows = execute_sql("SELECT DISTINCT lower(recipient_email) e FROM sent_emails WHERE recipient_email IS NOT NULL")
+    rows = execute_sql("SELECT DISTINCT lower(recipient_email) e FROM sent_emails "
+                       "WHERE brand_id=%s AND recipient_email IS NOT NULL", [bid])
     ours = {r["e"] for r in rows if r["e"]}
     print(f"known sent recipients: {len(ours)}")
 
@@ -81,16 +91,48 @@ def main():
     for a, r in bounced.items():
         try:
             execute_sql("UPDATE sent_emails SET status='bounced', bounced_at=NOW() "
-                        "WHERE lower(recipient_email)=%s AND bounced_at IS NULL", [a])
-            execute_sql("UPDATE scraped_leads SET status='invalid' WHERE lower(email)=%s", [a])
+                        "WHERE brand_id=%s AND lower(recipient_email)=%s AND bounced_at IS NULL", [bid, a])
+            execute_sql("UPDATE scraped_leads SET status='invalid' WHERE brand_id=%s AND lower(email)=%s", [bid, a])
             ex = sb.table("email_exclusions").select("id").eq("email", a).execute()
             if not ex.data:
                 sb.table("email_exclusions").insert({
                     "email": a, "reason": f"Hard bounce: {r}", "excluded_by": "bounce_handler"}).execute()
+            # global (cross-brand) suppression: global table, no brand filter
+            execute_sql("INSERT INTO global_suppression (email, reason, source_brand_id) VALUES (%s, %s, %s) "
+                        "ON CONFLICT DO NOTHING", [a, f"Hard bounce: {r}", bid])
             print(f"  quarantined {a}")
         except Exception as e:
             print(f"  ERROR {a}: {e}")
     print("done")
+
+
+def selected_brands():
+    ref = (os.getenv("BRAND_ID") or "").strip()
+    if ref:
+        b = brandcat.get_brand(ref)
+        if not b:
+            raise SystemExit(f"bounce_handler: unknown BRAND_ID {ref!r}")
+        return [b]
+    return brandcat.list_brands(active_only=True)
+
+
+def main():
+    failed = []
+    for brand in selected_brands():
+        with brand_scope(brand["id"]):
+            src, mbox = describe_brand_mailbox(brand["id"])
+            if not mbox:
+                print(f"--- brand {brand['slug']}: no mailbox — skipped", flush=True)
+                continue
+            print(f"--- brand {brand['slug']} ({mbox}) ---", flush=True)
+            try:
+                run_brand()
+            except Exception:
+                failed.append(brand["slug"])
+                print(f"ERROR brand {brand['slug']}:\n{traceback.format_exc()}", flush=True)
+    if failed:
+        raise SystemExit(f"bounce_handler failed for: {', '.join(failed)}")
+
 
 if __name__ == "__main__":
     main()

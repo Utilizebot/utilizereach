@@ -4,13 +4,18 @@ API endpoints for email management and tracking
 """
 
 from fastapi import APIRouter, HTTPException, Query, Depends
-
-from api.dependencies import require_permission
 from typing import Optional
 from datetime import datetime, timedelta
 
 from database.client import get_supabase_admin_client
 from database.pg import execute_sql
+from database import tenancy
+from api.dependencies import require_permission
+
+# Query-builder calls on tenant tables (sent_emails, email_clicks, email_replies,
+# email_bounces, email_unsubscribes, scraped_leads, email_accounts) are
+# auto-scoped to the active brand by database/pg.py. Raw SQL below filters by
+# brand_id explicitly.
 
 router = APIRouter(prefix="/api/emails", tags=["Emails"])
 
@@ -101,7 +106,8 @@ async def get_email_stats(
         try:
             rejected_rows = execute_sql(
                 "SELECT count(*) n FROM email_exclusions "
-                "WHERE reason ILIKE '%%reject%%' OR reason ILIKE '%%no mail server%%'"
+                "WHERE brand_id = %s AND (reason ILIKE '%%reject%%' OR reason ILIKE '%%no mail server%%')",
+                [tenancy.require_brand()],
             )
             rejected_count = int(rejected_rows[0]['n']) if rejected_rows else 0
         except Exception:
@@ -185,24 +191,46 @@ async def get_sent_emails(
 
         result = query.execute()
 
+        # Batch-lookup phone numbers from scraped_leads by recipient email
+        raw_emails = result.data or []
+        recipient_emails = list({e['recipient_email'] for e in raw_emails if e.get('recipient_email')})
+        phone_map = {}
+        if recipient_emails:
+            leads_rows = supabase.table('scraped_leads')\
+                .select('email,phone')\
+                .in_('email', recipient_emails)\
+                .execute()
+            for row in (leads_rows.data or []):
+                if row.get('email') and row.get('phone'):
+                    phone_map[row['email']] = row['phone']
+
+        # Clicks are tracked in email_clicks: one batched (brand-scoped) lookup
+        # instead of one query per email; same per-email counts.
+        click_counts = {}
+        sent_ids = [e['id'] for e in raw_emails if e.get('id')]
+        for i in range(0, len(sent_ids), 1000):
+            chunk = sent_ids[i:i + 1000]
+            click_rows = supabase.table('email_clicks')\
+                .select('sent_email_id')\
+                .in_('sent_email_id', chunk)\
+                .execute()
+            for row in (click_rows.data or []):
+                sid = row.get('sent_email_id')
+                click_counts[sid] = click_counts.get(sid, 0) + 1
+
         # Enrich with tracking data
         emails = []
-        for email in (result.data or []):
+        for email in raw_emails:
             # Opens are tracked via opened_at field in sent_emails
             opens_count = 1 if email.get('opened_at') else 0
 
-            # Clicks are tracked in email_clicks table
-            clicks = supabase.table('email_clicks')\
-                .select('id')\
-                .eq('sent_email_id', email['id'])\
-                .execute()
-
-            clicks_count = len(clicks.data) if clicks.data else 0
+            clicks_count = click_counts.get(email['id'], 0)
 
             emails.append({
                 **email,
                 "opens": opens_count,
-                "clicks": clicks_count
+                "clicks": clicks_count,
+                "phone": phone_map.get(email.get('recipient_email'))
             })
 
         return {
@@ -330,7 +358,8 @@ async def get_reply_details(reply_id: str):
 
 
 @router.put("/replies/{reply_id}/status")
-async def update_reply_status(reply_id: str, status_data: dict, _perm: dict = Depends(require_permission("emails.send"))):
+async def update_reply_status(reply_id: str, status_data: dict,
+                              _perm: dict = Depends(require_permission("leads.edit"))):
     """
     Mark reply as reviewed or update status
     """
@@ -344,12 +373,18 @@ async def update_reply_status(reply_id: str, status_data: dict, _perm: dict = De
             .eq('id', reply_id)\
             .execute()
 
+        # auto-scoped update: another brand's (or an unknown) reply matches 0 rows
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Reply not found")
+
         return {
             "success": True,
             "reply_id": reply_id,
             "is_reviewed": is_reviewed
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update reply status: {str(e)}")
 
@@ -414,7 +449,8 @@ async def get_email_performance(
 
 
 @router.post("/send-to-lead")
-async def send_email_to_lead(request_data: dict, _perm: dict = Depends(require_permission("emails.send"))):
+async def send_email_to_lead(request_data: dict,
+                             _perm: dict = Depends(require_permission("emails.send"))):
     """
     Send a single AI-generated email to a specific lead
 
@@ -452,10 +488,12 @@ async def send_email_to_lead(request_data: dict, _perm: dict = Depends(require_p
         if account_data.get('status') != 'active':
             raise HTTPException(status_code=400, detail="Email account is not active")
 
-        # Queue the email task
+        # Queue the email task. Celery workers have no request context: pass
+        # the active brand so the task runs inside brand_scope(brand_id).
         send_single_email_task.delay(
             lead_id=lead_id,
-            email_account_id=email_account_id
+            email_account_id=email_account_id,
+            brand_id=tenancy.require_brand(),
         )
 
         # Note: Lead status will be updated to 'contacted' by the celery task after email is sent

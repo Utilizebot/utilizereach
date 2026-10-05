@@ -2,6 +2,12 @@
 Scraper API Router
 
 Endpoints for lead scraping operations
+
+Multi-brand: scraping jobs and their scraped_leads are tenant data. All
+database/operations.py helpers used here go through the query builder, which
+is auto-scoped to the request's brand (a job of another brand is simply "not
+found"). The Celery task runs outside the request, so it is enqueued with
+brand_id=tenancy.require_brand() and wraps its body in brand_scope(brand_id).
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Response
@@ -21,6 +27,7 @@ from api.models import (
     LeadResult,
 )
 from api.dependencies import get_current_user, require_permission
+from database import tenancy
 from database.operations import (
     create_scraping_job,
     get_jobs_by_user,
@@ -69,8 +76,9 @@ async def start_scraping_job(
             api_key_used=api_key["id"],
         )
 
-        # Start Celery task
+        # Start Celery task (runs outside this request: carry the brand along)
         task = scrape_leads.delay(
+            brand_id=tenancy.require_brand(),
             job_id=job["id"],
             search_query=request.search_query,
             location=request.location,

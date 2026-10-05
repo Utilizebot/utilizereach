@@ -78,7 +78,8 @@ class GmailClient:
         recipient_id: Optional[str] = None,
         from_email: Optional[str] = None,
         from_name: Optional[str] = None,
-        bcc: Optional[str] = None
+        bcc: Optional[str] = None,
+        cc: Optional[str] = None
     ) -> Dict:
         """
         Send an email with tracking
@@ -110,6 +111,8 @@ class GmailClient:
             message['To'] = f"{to_name} <{to_email}>" if to_name else to_email
             if bcc:
                 message['Bcc'] = bcc
+            if cc:
+                message['Cc'] = cc
             message['Subject'] = subject
 
             # Add tracking pixel to HTML body
@@ -442,7 +445,16 @@ class GmailClient:
         from datetime import datetime
 
         try:
+            from database import tenancy
             from database.client import get_supabase_admin_client
+
+            # sent_emails / email_accounts are tenant tables: the row belongs
+            # to the ACTIVE brand (callers run inside brand_scope / a request).
+            if not tenancy.current_brand() or tenancy.in_system_scope():
+                print("Error saving email to database: no active brand "
+                      "(send inside brand_scope() to record it)")
+                return None
+
             supabase = get_supabase_admin_client()
 
             # Find email account ID - use from_email if provided, otherwise use self.email

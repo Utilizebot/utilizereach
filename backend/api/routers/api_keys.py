@@ -4,6 +4,16 @@ API Keys Router
 SerpAPI key CRUD per sales rep. Replaces the direct Supabase api_keys
 table access from ApiKeysSettings.tsx. Admins see/manage all keys,
 sales reps only their own.
+
+Multi-brand: api_keys is a tenant table. Every endpoint runs inside an
+authenticated request, so every query-builder call below is scoped to the
+active brand (another brand's key id simply 404s, inserts are stamped with
+the active brand). "Admin" means admin of the ACTIVE brand
+(current_user["role"] is the brand role), so a brand admin sees/manages all
+keys of that brand only; other users only their own keys within it.
+
+Creating / updating / deleting a key requires `apikeys.manage` (admin-only
+per api/permissions.py); listing stays available to every role.
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -36,7 +46,8 @@ class ApiKeyUpdate(BaseModel):
 
 
 def _is_admin(user: dict) -> bool:
-    return user.get("role") == "admin"
+    """Admin of the ACTIVE brand (role = brand role) or a platform admin."""
+    return user.get("role") == "admin" or bool(user.get("is_platform_admin"))
 
 
 def _get_owned_key(client, key_id: str, current_user: dict) -> dict:
@@ -50,7 +61,7 @@ def _get_owned_key(client, key_id: str, current_user: dict) -> dict:
 
 
 @router.get("/")
-async def list_api_keys(current_user: dict = Depends(require_permission("apikeys.manage"))):
+async def list_api_keys(current_user: dict = Depends(get_current_user)):
     """List API keys (admins: all, sales reps: own), newest first"""
     try:
         client = get_supabase_admin_client()
@@ -88,7 +99,8 @@ async def create_api_key(request: ApiKeyCreate, current_user: dict = Depends(req
 
 
 @router.put("/{key_id}")
-async def update_api_key(key_id: str, request: ApiKeyUpdate, current_user: dict = Depends(require_permission("apikeys.manage"))):
+async def update_api_key(key_id: str, request: ApiKeyUpdate,
+                         current_user: dict = Depends(require_permission("apikeys.manage"))):
     """Update an API key (name/key/active/limit)"""
     updates = {}
     if request.key_name is not None:
@@ -121,7 +133,9 @@ async def delete_api_key(key_id: str, current_user: dict = Depends(require_permi
     try:
         client = get_supabase_admin_client()
         _get_owned_key(client, key_id, current_user)
-        client.table("api_keys").delete().eq("id", key_id).execute()
+        deleted = client.table("api_keys").delete().eq("id", key_id).execute()
+        if not deleted.data:
+            raise HTTPException(status_code=404, detail="API key not found")
         return {"success": True}
     except HTTPException:
         raise

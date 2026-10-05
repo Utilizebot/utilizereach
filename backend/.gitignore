@@ -1,5 +1,8 @@
 # Environment variables
 .env
+.env.*
+!.env.example
+!.env.template
 
 # Python
 __pycache__/
@@ -53,3 +56,6 @@ Thumbs.db
 
 # Auto-generated JWT signing secret (KEEP SECRET! generated at runtime)
 .jwt_secret
+
+# Multi-brand isolation test reports (may contain local data)
+tests/multibrand/reports/

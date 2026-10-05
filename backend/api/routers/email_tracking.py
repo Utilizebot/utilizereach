@@ -1,13 +1,23 @@
 """
-Email Tracking Router
+Email Tracking Router (PUBLIC - no login)
 Handles tracking endpoints for email opens, clicks, and unsubscribes
+
+Recipients' mail clients hit these URLs, so there is no authenticated brand.
+Each handler looks the tracking token up inside system_scope() to learn the
+sent_emails row and its brand, then performs every write inside
+brand_scope(row["brand_id"]) (see docs/MULTIBRAND.md). The open pixel and the
+click redirect never error to the recipient.
 """
+
+from typing import Optional
 
 from fastapi import APIRouter, Response, HTTPException
 from fastapi.responses import RedirectResponse, StreamingResponse
 from datetime import datetime
 
 from database.client import get_supabase_admin_client
+from database.pg import execute_sql
+from database.tenancy import brand_scope, system_scope
 from urllib.parse import unquote
 import io
 
@@ -17,6 +27,28 @@ router = APIRouter(prefix="/track", tags=["Email Tracking"])
 def get_supabase():
     """Get database client"""
     return get_supabase_admin_client()
+
+
+def _find_sent_email(tracking_token: str) -> Optional[dict]:
+    """Cross-brand lookup of the sent email a public tracking token belongs to.
+
+    Trusted public-token lookup (system scope): the row's brand_id then decides
+    the brand every write runs as. Never returned to the caller.
+    """
+    if not tracking_token:
+        return None
+    with system_scope():
+        result = (
+            get_supabase().table("sent_emails")
+            .select("*")
+            .eq("tracking_token", tracking_token)
+            .limit(1)
+            .execute()
+        )
+    row = result.data[0] if result.data else None
+    if row and not row.get("brand_id"):
+        return None
+    return row
 
 
 @router.get("/open/{tracking_token}")
@@ -33,22 +65,23 @@ async def track_email_open(tracking_token: str):
     try:
         supabase = get_supabase()
 
-        # Find the sent email by tracking token
-        sent_email = supabase.table("sent_emails").select("*").eq("tracking_token", tracking_token).execute()
+        # Find the sent email by tracking token (cross-brand lookup)
+        sent = _find_sent_email(tracking_token)
 
-        if not sent_email.data or len(sent_email.data) == 0:
+        if not sent:
             # Email not found, but still return pixel (don't reveal tracking)
             return _return_tracking_pixel()
 
-        email_id = sent_email.data[0]["id"]
+        email_id = sent["id"]
 
         # Check if already opened (check opened_at field in sent_emails)
-        if not sent_email.data[0].get("opened_at"):
+        if not sent.get("opened_at"):
             # First open - update sent_emails with opened timestamp
-            supabase.table("sent_emails").update({
-                "opened_at": datetime.utcnow().isoformat(),
-                "status": "opened"
-            }).eq("id", email_id).execute()
+            with brand_scope(sent["brand_id"]):
+                supabase.table("sent_emails").update({
+                    "opened_at": datetime.utcnow().isoformat(),
+                    "status": "opened"
+                }).eq("id", email_id).execute()
 
         # Always return the tracking pixel
         return _return_tracking_pixel()
@@ -76,26 +109,28 @@ async def track_email_click(tracking_token: str, url: str):
         # Decode the URL
         original_url = unquote(url)
 
-        # Find the sent email by tracking token
-        sent_email = supabase.table("sent_emails").select("*").eq("tracking_token", tracking_token).execute()
+        # Find the sent email by tracking token (cross-brand lookup)
+        sent = _find_sent_email(tracking_token)
 
-        if sent_email.data and len(sent_email.data) > 0:
-            email_id = sent_email.data[0]["id"]
+        if sent:
+            email_id = sent["id"]
 
-            # Record the click (removed event_type as it doesn't exist in schema)
-            supabase.table("email_clicks").insert({
-                "sent_email_id": email_id,
-                "link_url": original_url,
-                "clicked_at": datetime.utcnow().isoformat(),
-                "user_agent": None,
-                "ip_address": None
-            }).execute()
+            # Every write runs as the email's own brand
+            with brand_scope(sent["brand_id"]):
+                # Record the click (removed event_type as it doesn't exist in schema)
+                supabase.table("email_clicks").insert({
+                    "sent_email_id": email_id,
+                    "link_url": original_url,
+                    "clicked_at": datetime.utcnow().isoformat(),
+                    "user_agent": None,
+                    "ip_address": None
+                }).execute()
 
-            # Update sent_email status if not already opened/clicked
-            if sent_email.data[0].get("status") == "sent":
-                supabase.table("sent_emails").update({
-                    "status": "clicked"
-                }).eq("id", email_id).execute()
+                # Update sent_email status if not already opened/clicked
+                if sent.get("status") == "sent":
+                    supabase.table("sent_emails").update({
+                        "status": "clicked"
+                    }).eq("id", email_id).execute()
 
         # Redirect to original URL
         return RedirectResponse(url=original_url, status_code=302)
@@ -119,31 +154,30 @@ async def track_unsubscribe(tracking_token: str):
     try:
         supabase = get_supabase()
 
-        # Find the sent email by tracking token
-        sent_email = supabase.table("sent_emails").select("*").eq("tracking_token", tracking_token).execute()
+        # Find the sent email by tracking token (cross-brand lookup)
+        sent = _find_sent_email(tracking_token)
 
-        if not sent_email.data or len(sent_email.data) == 0:
+        if not sent:
             raise HTTPException(status_code=404, detail="Email not found")
 
-        email_id = sent_email.data[0]["id"]
-        recipient_email = sent_email.data[0]["recipient_email"]
+        email_id = sent["id"]
+        brand_id = sent["brand_id"]
+        recipient_email = sent["recipient_email"]
 
-        # Check if already unsubscribed
-        existing = supabase.table("email_unsubscribes").select("id").eq("email", recipient_email).execute()
+        # Record the opt-out in THIS email's brand only. ON CONFLICT on the
+        # per-brand unique (brand_id, email) keeps it idempotent under races.
+        with brand_scope(brand_id):
+            inserted = execute_sql(
+                "INSERT INTO email_unsubscribes (brand_id, email, sent_email_id, unsubscribed_at, reason) "
+                "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (brand_id, email) DO NOTHING RETURNING id",
+                [brand_id, recipient_email, email_id, datetime.utcnow().isoformat(), "user_request"],
+            )
 
-        if not existing.data or len(existing.data) == 0:
-            # Record unsubscribe
-            supabase.table("email_unsubscribes").insert({
-                "email": recipient_email,
-                "sent_email_id": email_id,
-                "unsubscribed_at": datetime.utcnow().isoformat(),
-                "reason": "user_request"
-            }).execute()
-
-            # Update sent_email status
-            supabase.table("sent_emails").update({
-                "status": "unsubscribed"
-            }).eq("id", email_id).execute()
+            if inserted:
+                # First unsubscribe for this address in this brand
+                supabase.table("sent_emails").update({
+                    "status": "unsubscribed"
+                }).eq("id", email_id).execute()
 
         # Return HTML confirmation page
         html_content = """

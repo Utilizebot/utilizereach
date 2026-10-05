@@ -6,6 +6,8 @@ import {
 } from 'lucide-react';
 import { EmailDetailModal } from '../components/EmailDetailModal';
 import { FollowupEditor, type Followup } from '../components/FollowupEditor';
+import { useAuth } from '../hooks/useAuth';
+import { useConfig, useConfigContext } from '../context/ConfigContext';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 
@@ -14,23 +16,38 @@ interface Campaign {
   target_count: number; daily_cap?: number; variant_count: number; created_at?: string;
   progress: number; sent: number; opened: number; clicked: number; replied: number;
   open_rate: number; click_rate: number; reply_rate: number;
+  followup_count?: number; followup_engaged_only?: boolean; account_manager?: string;
 }
 interface Seg { key: string; label: string; color?: string; lead_count?: number; }
 
-const LEADAUTOMATION_BODY =
-  "<p>Hi {first_name},</p>" +
-  "<p>I'm reaching out from LeadAutomation, an AI meeting assistant built for teams working across Malay and English, because I think it could genuinely fit the way you work.</p>" +
-  "<p>LeadAutomation joins your calls and delivers best-in-class transcription in both languages, then automatically produces clean summaries, action items, and minutes, so nothing slips through after a meeting. You can also search across every past meeting in seconds, and it plugs straight into Microsoft Teams (Zoom, Slack, Discord, and Drive coming soon).</p>" +
-  "<p>If your week runs on back-to-back meetings, this can quietly save you hours of note-taking and follow-up.</p>" +
-  "<p>Open to a short call? You can <a href=\"https://example.com\">book a time here</a>.</p>" +
-  "<p>Warm regards,<br>The LeadAutomation Team</p>" +
-  "<p style=\"color:#888;font-size:12px\">example.com · AI meeting intelligence for Malay and English</p>";
+const escapeHtml = (s: string) =>
+  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-// Same on-brand body; A/B on the subject line.
-const DEFAULT_VARIANTS = [
-  { label: 'A', subject: 'Meeting notes in Malay and English, handled', body: LEADAUTOMATION_BODY },
-  { label: 'B', subject: 'Save hours on meeting notes every week', body: LEADAUTOMATION_BODY },
-];
+/** Host part of a website URL for display ("https://www.acme.com/x" -> "www.acme.com"). */
+const websiteHost = (url: string) => {
+  try { return new URL(url).host; } catch { return url.replace(/^https?:\/\//i, '').replace(/\/.*$/, ''); }
+};
+
+/** Neutral starter copy in the active brand's own name (used for every brand). */
+function starterVariants(brandName: string, website: string) {
+  const name = escapeHtml(brandName || 'our team');
+  const team = brandName ? `The ${name} Team` : 'The Team';
+  const safeUrl = /^https?:\/\//i.test(website) ? escapeHtml(website) : '';
+  const body =
+    "<p>Hi {first_name},</p>" +
+    `<p>I'm reaching out from ${name} because I think what we do could be a genuine fit for {company}.</p>` +
+    "<p>[Describe what you offer and the main benefit for the reader in one or two sentences.]</p>" +
+    (safeUrl
+      ? `<p>Open to a short call? You can <a href="${safeUrl}">learn more here</a>.</p>`
+      : "<p>Open to a short call? Just reply to this email and we'll find a time.</p>") +
+    `<p>Warm regards,<br>${team}</p>` +
+    (safeUrl ? `<p style="color:#888;font-size:12px">${escapeHtml(websiteHost(website))}</p>` : '');
+  const subjectName = brandName || 'us';
+  return [
+    { label: 'A', subject: `Quick question from ${subjectName}`, body },
+    { label: 'B', subject: 'An idea for your team', body },
+  ];
+}
 
 const statusColor = (s: string) =>
   s === 'active' ? 'bg-emerald-100 text-emerald-700'
@@ -39,6 +56,9 @@ const statusColor = (s: string) =>
     : 'bg-gray-100 text-gray-600';
 
 export function Campaigns() {
+  const { can } = useAuth();
+  const canCreate = can('campaigns.create');
+  const canEdit = can('campaigns.edit');
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [segments, setSegments] = useState<Seg[]>([]);
   const [loading, setLoading] = useState(true);
@@ -81,10 +101,12 @@ export function Campaigns() {
             <p className="text-sm text-gray-500">Monitor each campaign, compare A/B variants, track the team</p>
           </div>
         </div>
+        {canCreate && (
         <button onClick={() => setShowCreate(true)}
           className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-fuchsia-600 to-purple-600 text-white font-medium shadow hover:shadow-lg transition-all">
           <Plus className="h-4 w-4" /> New Campaign
         </button>
+        )}
       </div>
 
       {loading ? (
@@ -94,7 +116,7 @@ export function Campaigns() {
           <Megaphone className="h-14 w-14 text-gray-300 mx-auto mb-4" />
           <p className="text-lg font-semibold text-gray-800">No campaigns yet</p>
           <p className="text-sm text-gray-500 mt-1 mb-5">Create one to target a segment with A/B-tested emails, sent at your warmup pace.</p>
-          <button onClick={() => setShowCreate(true)} className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-fuchsia-600 to-purple-600 text-white font-medium">Create your first campaign</button>
+          {canCreate && <button onClick={() => setShowCreate(true)} className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-fuchsia-600 to-purple-600 text-white font-medium">Create your first campaign</button>}
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
@@ -123,10 +145,21 @@ export function Campaigns() {
                   <Stat icon={<MousePointerClick className="h-4 w-4" />} label="Click" val={`${c.click_rate}%`} tone="text-blue-600" />
                   <Stat icon={<MessageCircle className="h-4 w-4" />} label="Reply" val={`${c.reply_rate}%`} tone="text-emerald-600" />
                 </div>
+                {c.followup_count ? (
+                  <div className="mt-3 flex items-center gap-2 text-xs">
+                    <span className="flex items-center gap-1 text-indigo-600 font-medium"><Clock className="h-3.5 w-3.5" />{c.followup_count} follow-up{c.followup_count === 1 ? '' : 's'}</span>
+                    {c.followup_engaged_only && <span className="px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-600 text-[10px] font-semibold uppercase tracking-wide">Engaged only</span>}
+                  </div>
+                ) : null}
+                {c.account_manager && (
+                  <div className="mt-2 text-xs text-gray-500 flex items-center gap-1">
+                    <span className="px-1.5 py-0.5 rounded-full bg-purple-50 text-purple-700 text-[10px] font-semibold capitalize">AM · {c.account_manager}</span>
+                  </div>
+                )}
               </div>
               <div className="flex items-center justify-between px-5 py-3 border-t border-gray-100 bg-gray-50/60">
                 <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
-                  {c.status === 'active'
+                  {!canEdit ? null : c.status === 'active'
                     ? <button onClick={() => setStatus(c.id, 'paused')} className="p-1.5 rounded-lg hover:bg-amber-50 text-amber-600" title="Pause"><Pause className="h-4 w-4" /></button>
                     : <button onClick={() => setStatus(c.id, 'active')} className="p-1.5 rounded-lg hover:bg-emerald-50 text-emerald-600" title="Activate"><Play className="h-4 w-4" /></button>}
                 </div>
@@ -138,10 +171,10 @@ export function Campaigns() {
       )}
 
       <AnimatePresence>
-        {showCreate && <CreateModal segments={segments} onClose={() => setShowCreate(false)} onCreated={() => { setShowCreate(false); fetchAll(); }} />}
+        {showCreate && canCreate && <CreateModal segments={segments} onClose={() => setShowCreate(false)} onCreated={() => { setShowCreate(false); fetchAll(); }} />}
       </AnimatePresence>
       <AnimatePresence>
-        {openId && <DetailModal id={openId} onClose={() => setOpenId(null)} />}
+        {openId && <DetailModal id={openId} canEdit={canEdit} onClose={() => setOpenId(null)} />}
       </AnimatePresence>
     </div>
   );
@@ -161,8 +194,19 @@ function CreateModal({ segments, onClose, onCreated }: { segments: Seg[]; onClos
   const [segment, setSegment] = useState(segments[0]?.key || '');
   const [target, setTarget] = useState(100);
   const [dailyCap, setDailyCap] = useState(20);
-  const [variants, setVariants] = useState(DEFAULT_VARIANTS.map((v) => ({ ...v })));
+  // Every brand gets neutral starter copy in its own name / website. With no
+  // active brand (older backend) the dashboard config is the brand's config.
+  const { activeBrand } = useAuth();
+  const config = useConfig();
+  const { activeBrandRow } = useConfigContext();
+  // Only trust the dashboard config's identity once it belongs to this brand.
+  const configIsBrand = !activeBrand || activeBrandRow?.id === activeBrand.id;
+  const brandWebsite = configIsBrand ? (config.company.website || '') : '';
+  const brandName = (configIsBrand ? config.company.name : '') || activeBrand?.display_name || '';
+  const [variants, setVariants] = useState(() => starterVariants(brandName, brandWebsite));
   const [followups, setFollowups] = useState<Followup[]>([]);
+  const [engaged, setEngaged] = useState(true);
+  const [am, setAm] = useState('');
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
 
@@ -172,7 +216,7 @@ function CreateModal({ segments, onClose, onCreated }: { segments: Seg[]; onClos
     try {
       const res = await fetch(`${API_BASE}/api/campaigns/create`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, segment, target_count: target, daily_cap: dailyCap, variants, followups, status: 'active' }),
+        body: JSON.stringify({ name, segment, target_count: target, daily_cap: dailyCap, variants, followups, followup_engaged_only: engaged, account_manager: am.trim() || null, status: 'active' }),
       });
       if (!res.ok) throw new Error((await res.json()).detail || 'Failed');
       onCreated();
@@ -227,12 +271,27 @@ function CreateModal({ segments, onClose, onCreated }: { segments: Seg[]; onClos
                 </div>
               ))}
             </div>
-            <p className="text-xs text-gray-400 mt-2">A CTA link to example.com and the sender's name are appended automatically.</p>
+            <p className="text-xs text-gray-400 mt-2">
+              {brandWebsite
+                ? `The starter copy links to ${websiteHost(brandWebsite)}; the sender's name is appended automatically. Replace the bracketed text with your own pitch.`
+                : "The sender's name is appended automatically. Replace the bracketed text with your own pitch."}
+            </p>
           </div>
           <div>
             <div className="flex items-center gap-2 mb-2"><Clock className="h-4 w-4 text-indigo-600" /><span className="text-sm font-semibold text-gray-700">Follow-up sequence</span>
               <span className="text-xs text-gray-400">optional · auto-sent only if they don't reply</span></div>
             <FollowupEditor value={followups} onChange={setFollowups} />
+            <label className="flex items-center gap-3 mt-3 cursor-pointer select-none">
+              <button type="button" onClick={() => setEngaged(!engaged)} className={`relative h-6 w-11 rounded-full transition-colors flex-none ${engaged ? 'bg-indigo-600' : 'bg-gray-300'}`}>
+                <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${engaged ? 'left-[22px]' : 'left-0.5'}`} />
+              </button>
+              <span className="text-sm text-gray-600"><b className="text-gray-800">Only follow up with engaged contacts</b> — skip anyone who didn't open or click the previous email.</span>
+            </label>
+            <div className="mt-3">
+              <label className="block text-sm font-semibold text-gray-700 mb-1">Account manager <span className="text-xs font-normal text-gray-400">· for attribution</span></label>
+              <input value={am} onChange={(e) => setAm(e.target.value)} placeholder="who runs this campaign"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500" />
+            </div>
           </div>
           {err && <p className="text-sm text-red-600">{err}</p>}
         </div>
@@ -247,12 +306,30 @@ function CreateModal({ segments, onClose, onCreated }: { segments: Seg[]; onClos
   );
 }
 
-function DetailModal({ id, onClose }: { id: string; onClose: () => void }) {
+function DetailModal({ id, canEdit, onClose }: { id: string; canEdit: boolean; onClose: () => void }) {
   const [data, setData] = useState<any>(null);
   const [emailId, setEmailId] = useState<string | null>(null);
+  const [fu, setFu] = useState<Followup[]>([]);
+  const [eng, setEng] = useState(false);
+  const [am, setAm] = useState('');
+  const [savingFu, setSavingFu] = useState(false);
+  const [savedFu, setSavedFu] = useState(false);
   useEffect(() => {
-    fetch(`${API_BASE}/api/campaigns/detail/${id}`, { cache: 'no-store' }).then((r) => r.json()).then(setData).catch(() => {});
+    fetch(`${API_BASE}/api/campaigns/detail/${id}`, { cache: 'no-store' }).then((r) => r.json())
+      .then((d) => { setData(d); setFu(d?.campaign?.followups || []); setEng(!!d?.campaign?.followup_engaged_only); setAm(d?.campaign?.account_manager || ''); }).catch(() => {});
   }, [id]);
+
+  const saveFu = async () => {
+    setSavingFu(true); setSavedFu(false);
+    try {
+      await fetch(`${API_BASE}/api/campaigns/${id}/update-followups`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ followups: fu, followup_engaged_only: eng, account_manager: am.trim() || null }),
+      });
+      setSavedFu(true); setTimeout(() => setSavedFu(false), 2500);
+    } catch { /* ignore */ }
+    setSavingFu(false);
+  };
 
   const vs = data?.variants_stats || [];
   const bestOpen = Math.max(0, ...vs.map((v: any) => v.open_rate));
@@ -282,6 +359,40 @@ function DetailModal({ id, onClose }: { id: string; onClose: () => void }) {
               <Big label="Clicked" val={`${data.stats.click_rate}%`} icon={<MousePointerClick className="h-4 w-4" />} />
               <Big label="Replied" val={`${data.stats.reply_rate}%`} icon={<MessageCircle className="h-4 w-4" />} />
               <Big label="Target" val={data.campaign.target_count} icon={<Target className="h-4 w-4" />} />
+            </div>
+
+            {/* Follow-up control — edit the live sequence + engagement gate */}
+            <div className="rounded-xl border border-indigo-100 bg-indigo-50/40 p-4">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="flex items-center gap-2 text-sm font-semibold text-gray-700"><Clock className="h-4 w-4 text-indigo-600" /> Follow-up sequence</div>
+                <button onClick={saveFu} disabled={savingFu || !canEdit} title={canEdit ? undefined : 'You do not have permission to edit campaigns'}
+                  className="px-3 py-1.5 rounded-lg bg-indigo-600 text-white text-sm font-medium disabled:opacity-50 min-w-[112px]">
+                  {savingFu ? 'Saving…' : savedFu ? 'Saved ✓' : 'Save changes'}
+                </button>
+              </div>
+              <label className="flex items-center gap-3 mt-3 cursor-pointer select-none">
+                <button type="button" onClick={() => setEng(!eng)} className={`relative h-6 w-11 rounded-full transition-colors flex-none ${eng ? 'bg-indigo-600' : 'bg-gray-300'}`}>
+                  <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${eng ? 'left-[22px]' : 'left-0.5'}`} />
+                </button>
+                <span className="text-sm text-gray-700"><b>Only follow up with engaged contacts</b> — skip anyone who didn't open or click the prior email.</span>
+              </label>
+              <div className="mt-3 flex items-center gap-2">
+                <span className="text-sm font-semibold text-gray-700 whitespace-nowrap">Account manager</span>
+                <input value={am} onChange={(e) => setAm(e.target.value)} placeholder="who runs this campaign"
+                  className="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500" />
+              </div>
+              {fu.length > 0 && (
+                <div className="flex items-center gap-1 mt-4 text-xs overflow-x-auto pb-1">
+                  <span className="px-2 py-1 rounded-lg bg-blue-100 text-blue-700 font-semibold whitespace-nowrap">Intro</span>
+                  {fu.map((f, i) => (
+                    <span key={i} className="flex items-center gap-1 whitespace-nowrap">
+                      <span className="text-gray-300">→</span>
+                      <span className="px-2 py-1 rounded-lg bg-amber-100 text-amber-700 font-semibold">F{i + 1} · +{f.after_days}d</span>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <div className="mt-3"><FollowupEditor value={fu} onChange={setFu} /></div>
             </div>
 
             <div>

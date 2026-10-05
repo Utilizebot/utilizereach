@@ -49,4 +49,4 @@ WHERE NOT EXISTS (SELECT 1 FROM email_ai_settings);
 INSERT INTO email_exclusions (email, reason, excluded_by) VALUES
 ('demo.com', 'Internal test account', 'system'),
 ('demo.com', 'Team member', 'system')
-ON CONFLICT (email) DO NOTHING;
+ON CONFLICT DO NOTHING;

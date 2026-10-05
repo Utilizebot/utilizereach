@@ -1,11 +1,16 @@
 """
 Auth Router
 
-Local email/password authentication backed by the sales_reps table.
-Issues HS256 JWTs (see api/security.py). Replaces Supabase Auth.
+Local email/password authentication backed by the sales_reps table (global
+login identities). Issues HS256 JWTs (see api/security.py) that also carry the
+brand the session acts in; brand membership + role are re-checked on every
+request by api/dependencies.get_current_user.
+
+The legacy /api/auth/users endpoints are kept for the existing UI but now
+manage MEMBERS OF THE ACTIVE BRAND (see api/membership.py).
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from pydantic import BaseModel
 from typing import Optional
 import sys
@@ -14,13 +19,15 @@ import os
 # Add parent directory to import path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from api.dependencies import get_current_user, require_permission
-from api.security import create_access_token, hash_password, verify_password
-from api.permissions import (
-    ROLES, MEMBER, canonical_role, permissions_for, role_catalog, ROLE_LABELS,
+from api import membership
+from api.dependencies import (
+    get_current_user, require_permission, resolve_user_brand, _request_host,
 )
+from api.permissions import ROLE_LABELS, canonical_role, permissions_for_user, role_catalog
+from api.security import create_access_token, hash_password, verify_password
 from database.client import get_supabase_admin_client
 from database.pg import execute_sql
+from database.tenancy import DEFAULT_BRAND_ID
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -28,6 +35,7 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 class LoginRequest(BaseModel):
     email: str
     password: str
+    brand: Optional[str] = None      # optional brand id or slug to start in
 
 
 class RegisterRequest(BaseModel):
@@ -51,15 +59,16 @@ class ChangePasswordRequest(BaseModel):
     new_password: str
 
 
-def _public_user(row: dict) -> dict:
-    row = dict(row)
+def public_user(user: dict) -> dict:
+    """The user payload returned to the frontend (no secrets, with brand context)."""
+    row = dict(user)
     row.pop("password_hash", None)
-    # Surface the effective role + its permission set so the frontend can gate
-    # UI consistently with the backend (single source of truth = permissions.py).
-    role = canonical_role(row.get("role"))
+    role = canonical_role(row.get("brand_role") or row.get("role"))
     row["role"] = role
+    row["brand_role"] = role
     row["role_label"] = ROLE_LABELS.get(role, role.title())
-    row["permissions"] = permissions_for(role)
+    row["permissions"] = permissions_for_user(row)
+    row["is_platform_admin"] = bool(row.get("is_platform_admin"))
     return row
 
 
@@ -68,18 +77,26 @@ def _admin_exists() -> bool:
     return bool(rows)
 
 
-def _token_response(row: dict) -> dict:
-    token = create_access_token(row["id"], row["email"], canonical_role(row.get("role")))
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "user": _public_user(row),
-    }
+def session_for(user_row: dict, requested_brand: Optional[str], host: Optional[str]) -> dict:
+    """Resolve the brand for a fresh session and mint its token."""
+    user = dict(user_row)
+    user.pop("password_hash", None)
+    resolved = resolve_user_brand(user, requested_brand, host)
+    brand = resolved["brand"]
+    user["global_role"] = user.get("role")
+    user["brand_id"] = brand["id"]
+    user["brand_slug"] = brand["slug"]
+    user["brand_name"] = brand["display_name"]
+    user["brand_role"] = resolved["role"]
+    user["role"] = resolved["role"]
+    user["brands"] = resolved["brands"]
+    token = create_access_token(user["id"], user["email"], resolved["role"], brand["id"])
+    return {"access_token": token, "token_type": "bearer", "user": public_user(user)}
 
 
 @router.post("/login")
-async def login(request: LoginRequest):
-    """Login with email/password, returns a JWT + the sales rep profile"""
+async def login(request: LoginRequest, http_request: Request):
+    """Login with email/password, returns a JWT (bound to a brand) + the profile."""
     email = request.email.strip().lower()
     client = get_supabase_admin_client()
 
@@ -90,11 +107,9 @@ async def login(request: LoginRequest):
     row = result.data[0]
     if not verify_password(request.password, row.get("password_hash") or ""):
         raise HTTPException(status_code=401, detail="Invalid email or password")
-
     if row.get("is_active") is False:
         raise HTTPException(status_code=403, detail="This account has been deactivated. Contact an administrator.")
 
-    # Update last_login server-side (used to be a fire-and-forget from the browser)
     updated = execute_sql(
         "UPDATE sales_reps SET last_login = NOW() WHERE id = %s RETURNING *",
         [row["id"]],
@@ -102,17 +117,19 @@ async def login(request: LoginRequest):
     if updated:
         row = updated[0]
 
-    return _token_response(row)
+    return session_for(row, request.brand, _request_host(http_request))
 
 
 @router.post("/register")
-async def register(request: RegisterRequest, authorization: Optional[str] = Header(None)):
+async def register(request: RegisterRequest, http_request: Request,
+                   authorization: Optional[str] = Header(None)):
     """
-    Register a new user.
+    Register a user.
 
-    If no user with a password exists yet, this is the unauthenticated
-    bootstrap path (setup wizard) and the new user becomes admin.
-    Otherwise an admin Bearer token is required.
+    Bootstrap (no account with a password exists yet - setup wizard): the new
+    user becomes a PLATFORM ADMIN and admin of the default brand.
+    Otherwise an authenticated admin of the active brand adds the user to that
+    brand (same as POST /api/brands/current/members).
     """
     email = request.email.strip().lower()
     if not email or not request.password:
@@ -121,55 +138,40 @@ async def register(request: RegisterRequest, authorization: Optional[str] = Head
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
 
     if not _admin_exists():
-        role = "admin"
-    else:
-        current = await get_current_user(authorization)
-        if canonical_role(current.get("role")) != "admin":
-            raise HTTPException(status_code=403, detail="Only admins can register new users")
-        role = canonical_role(request.role) if request.role else MEMBER
-
-    if role not in ROLES:
-        raise HTTPException(status_code=400, detail=f"Invalid role: {role}")
-
-    client = get_supabase_admin_client()
-    existing = client.table("sales_reps").select("*").eq("email", email).execute()
-
-    if existing.data:
-        row = existing.data[0]
-        if row.get("password_hash"):
-            raise HTTPException(status_code=400, detail="A user with this email already exists")
-        # Legacy profile without a password — claim it
-        updated = (
-            client.table("sales_reps")
-            .update({
-                "password_hash": hash_password(request.password),
-                "full_name": request.full_name,
-                "role": role,
-                "is_active": True,
-            })
-            .eq("id", row["id"])
-            .execute()
+        existing = execute_sql("SELECT id FROM sales_reps WHERE lower(email) = %s", [email])
+        if existing:
+            rows = execute_sql(
+                "UPDATE sales_reps SET password_hash = %s, full_name = %s, role = 'admin', "
+                "is_active = TRUE, is_platform_admin = TRUE WHERE id = %s RETURNING *",
+                [hash_password(request.password), request.full_name, existing[0]["id"]],
+            )
+        else:
+            rows = execute_sql(
+                "INSERT INTO sales_reps (email, full_name, password_hash, role, is_active, is_platform_admin) "
+                "VALUES (%s, %s, %s, 'admin', TRUE, TRUE) RETURNING *",
+                [email, request.full_name, hash_password(request.password)],
+            )
+        user = rows[0]
+        execute_sql(
+            "INSERT INTO brand_members (brand_id, sales_rep_id, role, is_default) VALUES (%s, %s, 'admin', TRUE) "
+            "ON CONFLICT (brand_id, sales_rep_id) DO UPDATE SET role = 'admin'",
+            [DEFAULT_BRAND_ID, user["id"]],
         )
-        return _token_response(updated.data[0])
+        return session_for(user, None, _request_host(http_request))
 
-    created = (
-        client.table("sales_reps")
-        .insert({
-            "email": email,
-            "full_name": request.full_name,
-            "password_hash": hash_password(request.password),
-            "role": role,
-            "is_active": True,
-        })
-        .execute()
-    )
-    return _token_response(created.data[0])
+    current = await get_current_user(http_request, authorization)
+    if not (current.get("is_platform_admin") or current.get("brand_role") == "admin"):
+        raise HTTPException(status_code=403, detail="Only brand admins can register new users")
+    membership.add_member(current["brand_id"], current, email, request.role,
+                          request.full_name, request.password)
+    rows = execute_sql("SELECT * FROM sales_reps WHERE lower(email) = %s", [email])
+    return {"success": True, "user": public_user({**rows[0], "brand_role": canonical_role(request.role or "member")})}
 
 
 @router.get("/me")
 async def get_me(current_user: dict = Depends(get_current_user)):
-    """Current user's sales rep profile"""
-    return _public_user(current_user)
+    """Current user's profile, active brand, brands and permissions."""
+    return public_user(current_user)
 
 
 @router.patch("/me")
@@ -177,25 +179,21 @@ async def update_me(request: ProfileUpdate, current_user: dict = Depends(get_cur
     """Update the current user's profile (partial update)"""
     updates = {k: v for k, v in request.model_dump().items() if v is not None}
     if not updates:
-        return _public_user(current_user)
+        return public_user(current_user)
 
     if "email" in updates:
         updates["email"] = updates["email"].strip().lower()
 
     client = get_supabase_admin_client()
     try:
-        result = (
-            client.table("sales_reps")
-            .update(updates)
-            .eq("id", current_user["id"])
-            .execute()
-        )
+        result = client.table("sales_reps").update(updates).eq("id", current_user["id"]).execute()
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to update profile: {str(e)}")
 
     if not result.data:
         raise HTTPException(status_code=404, detail="Sales rep not found")
-    return _public_user(result.data[0])
+    merged = {**current_user, **result.data[0]}
+    return public_user(merged)
 
 
 @router.post("/change-password")
@@ -204,10 +202,7 @@ async def change_password(request: ChangePasswordRequest, current_user: dict = D
     if len(request.new_password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
 
-    rows = execute_sql(
-        "SELECT password_hash FROM sales_reps WHERE id = %s",
-        [current_user["id"]],
-    )
+    rows = execute_sql("SELECT password_hash FROM sales_reps WHERE id = %s", [current_user["id"]])
     if not rows:
         raise HTTPException(status_code=404, detail="Sales rep not found")
 
@@ -227,14 +222,20 @@ async def auth_status():
     return {"adminExists": _admin_exists()}
 
 
+@router.get("/roles")
+async def list_roles(current_user: dict = Depends(get_current_user)):
+    """Role catalog (value, label, description, permissions) for role pickers."""
+    return {"roles": role_catalog()}
+
+
 # ============================================================================
-# ADMIN USER MANAGEMENT (admin-gated)
+# LEGACY USER MANAGEMENT - now scoped to the ACTIVE BRAND's members
 # ============================================================================
 class AdminCreateUser(BaseModel):
     email: str
-    full_name: str
-    password: str
-    role: Optional[str] = MEMBER
+    full_name: Optional[str] = None
+    password: Optional[str] = None
+    role: Optional[str] = "member"
 
 
 class AdminResetPassword(BaseModel):
@@ -247,104 +248,52 @@ class AdminUpdateUser(BaseModel):
     is_active: Optional[bool] = None
 
 
-@router.get("/roles")
-async def list_roles(current_user: dict = Depends(get_current_user)):
-    """Role catalog (value, label, description, permissions) for role pickers."""
-    return {"roles": role_catalog()}
-
-
 @router.get("/users")
 async def list_users(current_user: dict = Depends(require_permission("users.view"))):
-    """List all users (managers + admins)."""
-    rows = execute_sql(
-        "SELECT id, email, full_name, role, is_active, last_login, created_at "
-        "FROM sales_reps ORDER BY created_at DESC"
-    )
-    rows = rows or []
-    for r in rows:
-        r["role"] = canonical_role(r.get("role"))
-        r["role_label"] = ROLE_LABELS.get(r["role"], r["role"].title())
-    return {"users": rows}
+    """Members of the active brand."""
+    return {"users": membership.list_members(current_user["brand_id"]),
+            "brand": {"id": current_user["brand_id"], "display_name": current_user["brand_name"]}}
 
 
 @router.post("/users")
-async def admin_create_user(request: AdminCreateUser, current_user: dict = Depends(require_permission("users.manage"))):
-    """Create a user (admins only)."""
-    email = request.email.strip().lower()
-    if not email or "@" not in email:
-        raise HTTPException(status_code=400, detail="A valid email is required")
-    if len(request.password) < 6:
-        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
-    role = canonical_role(request.role) if request.role else MEMBER
-    if role not in ROLES:
-        raise HTTPException(status_code=400, detail=f"Invalid role: {role}")
-    client = get_supabase_admin_client()
-    existing = client.table("sales_reps").select("*").eq("email", email).execute()
-    if existing.data:
-        row = existing.data[0]
-        if row.get("password_hash"):
-            raise HTTPException(status_code=400, detail="A user with this email already exists")
-        updated = client.table("sales_reps").update({
-            "full_name": request.full_name,
-            "password_hash": hash_password(request.password),
-            "role": role, "is_active": True,
-        }).eq("id", row["id"]).execute()
-        return {"success": True, "user": _public_user(updated.data[0])}
-    created = client.table("sales_reps").insert({
-        "email": email, "full_name": request.full_name,
-        "password_hash": hash_password(request.password), "role": role, "is_active": True,
-    }).execute()
-    return {"success": True, "user": _public_user(created.data[0])}
+async def admin_create_user(request: AdminCreateUser,
+                            current_user: dict = Depends(require_permission("users.manage"))):
+    """Add a person to the active brand (creating the account if needed)."""
+    res = membership.add_member(current_user["brand_id"], current_user, request.email,
+                                request.role, request.full_name, request.password)
+    rows = execute_sql("SELECT id, email, full_name, is_active, last_login, created_at FROM sales_reps WHERE id = %s",
+                       [res["user_id"]])
+    user = {**(rows[0] if rows else {}), "role": res["role"], "role_label": ROLE_LABELS.get(res["role"])}
+    return {"success": True, "user": user, "created": res["created"]}
 
 
 @router.post("/users/{user_id}/reset-password")
 async def admin_reset_password(user_id: str, request: AdminResetPassword,
                                current_user: dict = Depends(require_permission("users.manage"))):
-    """Set a new password for any user (admins only)."""
-    if len(request.new_password) < 6:
-        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
-    rows = execute_sql(
-        "UPDATE sales_reps SET password_hash = %s WHERE id = %s RETURNING id, email",
-        [hash_password(request.new_password), user_id],
-    )
-    if not rows:
-        raise HTTPException(status_code=404, detail="User not found")
-    return {"success": True, "email": rows[0]["email"]}
+    res = membership.reset_member_password(current_user["brand_id"], current_user, user_id, request.new_password)
+    return {"success": True, "email": res["email"]}
 
 
 @router.patch("/users/{user_id}")
 async def admin_update_user(user_id: str, request: AdminUpdateUser,
                             current_user: dict = Depends(require_permission("users.manage"))):
-    """Update a user's name / role / active status (admins only)."""
-    updates = {k: v for k, v in request.dict().items() if v is not None}
-    if not updates:
-        raise HTTPException(status_code=400, detail="No fields to update")
-    if "role" in updates:
-        updates["role"] = canonical_role(updates["role"])
-        if updates["role"] not in ROLES:
-            raise HTTPException(status_code=400, detail="Invalid role")
-    if user_id == current_user["id"] and (
-        (updates.get("role") and updates["role"] != "admin") or updates.get("is_active") is False
-    ):
-        raise HTTPException(status_code=400, detail="You cannot demote or deactivate your own account")
-    client = get_supabase_admin_client()
-    res = client.table("sales_reps").update(updates).eq("id", user_id).execute()
-    if not res.data:
-        raise HTTPException(status_code=404, detail="User not found")
-    return {"success": True, "user": _public_user(res.data[0])}
+    """Change a member's role in the active brand (name / activation: see rules)."""
+    if not execute_sql("SELECT 1 FROM brand_members WHERE brand_id = %s AND sales_rep_id = %s",
+                       [current_user["brand_id"], user_id]):
+        raise HTTPException(status_code=404, detail="User not found in this brand")
+    if request.role is not None:
+        membership.update_member_role(current_user["brand_id"], current_user, user_id, request.role)
+    if request.is_active is not None:
+        membership.set_account_active(current_user, user_id, request.is_active)
+    if request.full_name:
+        membership.guard_global_account_change(current_user["brand_id"], current_user, user_id)
+        execute_sql("UPDATE sales_reps SET full_name = %s WHERE id = %s", [request.full_name, user_id])
+    members = [m for m in membership.list_members(current_user["brand_id"]) if str(m["id"]) == str(user_id)]
+    return {"success": True, "user": members[0] if members else None}
 
 
 @router.delete("/users/{user_id}")
 async def admin_delete_user(user_id: str, current_user: dict = Depends(require_permission("users.manage"))):
-    """Delete a user (admins only). Guards against self-delete and last-admin."""
-    if user_id == current_user["id"]:
-        raise HTTPException(status_code=400, detail="You cannot delete your own account")
-    target = execute_sql("SELECT role FROM sales_reps WHERE id = %s", [user_id])
-    if not target:
-        raise HTTPException(status_code=404, detail="User not found")
-    if canonical_role(target[0]["role"]) == "admin":
-        admins = execute_sql("SELECT id FROM sales_reps WHERE role = 'admin'")
-        if len(admins) <= 1:
-            raise HTTPException(status_code=400, detail="Cannot delete the last admin")
-    get_supabase_admin_client().table("sales_reps").delete().eq("id", user_id).execute()
+    """Remove a person from the active brand (their account and other brands are untouched)."""
+    membership.remove_member(current_user["brand_id"], current_user, user_id)
     return {"success": True}

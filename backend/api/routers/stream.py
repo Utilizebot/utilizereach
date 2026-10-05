@@ -1,14 +1,23 @@
 """
 Real-time agent activity stream (SSE)
 Serves live DB events to the Agent Stream dashboard page.
+
+Multi-brand: the browser EventSource API cannot send an Authorization header,
+so the endpoint authenticates with Depends(get_current_user_from_query)
+(`?token=<jwt>`), which also binds the caller's active brand. The brand id is
+captured once at connect time and every poll runs inside brand_scope(brand_id)
+with an explicit brand_id filter on every tenant table, so a stream only ever
+carries the active brand's activity.
 """
 
 import json
 import asyncio
 from datetime import datetime, timedelta
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from database.pg import execute_sql
+from database.tenancy import brand_scope
+from api.dependencies import get_current_user_from_query
 
 router = APIRouter(prefix="/api/stream", tags=["Stream"])
 
@@ -29,8 +38,17 @@ def _parse_ts(val) -> datetime | None:
         return None
 
 
-def _fetch_events(since: datetime) -> list:
-    """Pull recent agent activity from the DB."""
+def _fetch_events(since: datetime, brand_id: str) -> list:
+    """Pull recent agent activity for ONE brand from the DB.
+
+    Runs in a worker thread: the brand is re-bound explicitly here rather than
+    relying on ContextVar propagation.
+    """
+    with brand_scope(brand_id):
+        return _fetch_brand_events(since, brand_id)
+
+
+def _fetch_brand_events(since: datetime, brand_id: str) -> list:
     events = []
     s = since.isoformat()
 
@@ -39,10 +57,11 @@ def _fetch_events(since: datetime) -> list:
         SELECT from_email, recipient_email, recipient_name,
                subject, status, sent_at, opened_at, replied_at, bounced_at
         FROM sent_emails
-        WHERE sent_at    >= %s
+        WHERE brand_id = %s
+          AND (sent_at    >= %s
            OR opened_at  >= %s
            OR replied_at >= %s
-           OR bounced_at >= %s
+           OR bounced_at >= %s)
         ORDER BY GREATEST(
             sent_at,
             COALESCE(opened_at,  '1970-01-01'::timestamptz),
@@ -50,7 +69,7 @@ def _fetch_events(since: datetime) -> list:
             COALESCE(bounced_at, '1970-01-01'::timestamptz)
         ) DESC
         LIMIT 50
-    """, [s, s, s, s])
+    """, [brand_id, s, s, s, s])
 
     for row in (rows or []):
         from_email = row.get('from_email', '')
@@ -91,11 +110,12 @@ def _fetch_events(since: datetime) -> list:
         SELECT search_query, location, status, progress,
                leads_found, started_at, completed_at
         FROM scraping_jobs
-        WHERE started_at   >= %s
-           OR completed_at >= %s
+        WHERE brand_id = %s
+          AND (started_at   >= %s
+           OR completed_at >= %s)
         ORDER BY GREATEST(started_at, COALESCE(completed_at, '1970-01-01'::timestamptz)) DESC
         LIMIT 10
-    """, [s, s])
+    """, [brand_id, s, s])
 
     for row in (job_rows or []):
         query        = row.get('search_query', '')
@@ -128,10 +148,11 @@ def _fetch_events(since: datetime) -> list:
     sched_rows = execute_sql("""
         SELECT status, emails_sent, emails_failed, started_at, completed_at
         FROM scheduler_run_history
-        WHERE started_at >= %s
+        WHERE brand_id = %s
+          AND started_at >= %s
         ORDER BY started_at DESC
         LIMIT 5
-    """, [s])
+    """, [brand_id, s])
 
     for row in (sched_rows or []):
         status       = row.get('status', '')
@@ -162,11 +183,14 @@ def _fetch_events(since: datetime) -> list:
 
 
 @router.get("/agents")
-async def agent_activity_stream():
+async def agent_activity_stream(current_user: dict = Depends(get_current_user_from_query)):
     """
-    SSE stream of real agent activity (emails, scraping, campaigns).
+    SSE stream of real agent activity (emails, scraping, campaigns) for the
+    caller's active brand.
     On connect: last 24 h of history.  Then: new events every 3 s.
     """
+    brand_id = str(current_user["brand_id"])
+
     async def generate():
         from datetime import timezone
         now       = lambda: datetime.now(timezone.utc)
@@ -174,7 +198,7 @@ async def agent_activity_stream():
         first_tick = True
         while True:
             try:
-                evs = await asyncio.to_thread(_fetch_events, since)
+                evs = await asyncio.to_thread(_fetch_events, since, brand_id)
                 if evs:
                     for ev in evs:
                         yield f"data: {json.dumps(ev)}\n\n"

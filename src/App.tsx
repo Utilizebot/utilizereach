@@ -24,6 +24,8 @@ import { UsersSettings } from './pages/Settings/UsersSettings';
 import { ApiKeysSettings } from './pages/Settings/ApiKeysSettings';
 import { SchedulerSettings } from './pages/Settings/SchedulerSettings';
 import { EmailAISettings } from './pages/Settings/EmailAISettings';
+import { BrandSettings } from './pages/Settings/BrandSettings';
+import { BrandsSettings } from './pages/Settings/BrandsSettings';
 import { SetupWizard } from './pages/SetupWizard';
 import { useConfigContext } from './context/ConfigContext';
 import { NexusDashboard } from './pages/NexusDashboard';
@@ -109,6 +111,18 @@ function AppContent() {
           }
         />
 
+        {/* Outbound performance — What's Winning + AI recommendations */}
+        <Route
+          path="/winning"
+          element={
+            <ProtectedRoute>
+              <DashboardLayout>
+                <WhatsWinning />
+              </DashboardLayout>
+            </ProtectedRoute>
+          }
+        />
+
         {/* Email Marketing - Emails Dashboard */}
         <Route
           path="/emails"
@@ -157,18 +171,6 @@ function AppContent() {
           }
         />
 
-        {/* What's Winning — outbound performance + AI recommendations */}
-        <Route
-          path="/winning"
-          element={
-            <ProtectedRoute>
-              <DashboardLayout>
-                <WhatsWinning />
-              </DashboardLayout>
-            </ProtectedRoute>
-          }
-        />
-
         {/* Agent Activity Stream */}
         <Route
           path="/agent-stream"
@@ -209,10 +211,16 @@ function AppContent() {
           <Route path="profile" element={<ProfileSettings />} />
           <Route path="users" element={<ProtectedRoute requiredPermission="users.view"><UsersSettings /></ProtectedRoute>} />
 
+          {/* Active brand: identity, branding, sender settings */}
+          <Route path="brand" element={<ProtectedRoute requiredPermission="settings.manage"><BrandSettings /></ProtectedRoute>} />
+
+          {/* Brand catalog - platform admins only (page re-checks isPlatformAdmin) */}
+          <Route path="brands" element={<ProtectedRoute requiredPermission="brands.manage"><BrandsSettings /></ProtectedRoute>} />
+
           {/* Automated Campaign Scheduler */}
           <Route path="scheduler" element={<ProtectedRoute requiredPermission="settings.manage"><SchedulerSettings /></ProtectedRoute>} />
 
-          {/* AI Email Settings - Admin Only */}
+          {/* AI Email Settings */}
           <Route path="email-ai" element={<ProtectedRoute requiredPermission="settings.manage"><EmailAISettings /></ProtectedRoute>} />
 
           {/* API Keys Management - Phase 2 */}
@@ -251,12 +259,13 @@ function AppContent() {
           }
         />
 
-        <Route path="/nexus" element={<NexusDashboard />} />
-        <Route path="/nexus/agent-hub" element={<NexusAgentHub />} />
-        <Route path="/nexus/stakeholders" element={<NexusStakeholders />} />
-        <Route path="/nexus/campaigns" element={<NexusCampaignBuilder />} />
-        <Route path="/nexus/audit-logs" element={<NexusAuditLogs />} />
-        <Route path="/nexus/settings" element={<NexusSettings />} />
+        {/* Nexus APIs are brand-scoped and require auth, so the pages do too */}
+        <Route path="/nexus" element={<ProtectedRoute><NexusDashboard /></ProtectedRoute>} />
+        <Route path="/nexus/agent-hub" element={<ProtectedRoute><NexusAgentHub /></ProtectedRoute>} />
+        <Route path="/nexus/stakeholders" element={<ProtectedRoute><NexusStakeholders /></ProtectedRoute>} />
+        <Route path="/nexus/campaigns" element={<ProtectedRoute><NexusCampaignBuilder /></ProtectedRoute>} />
+        <Route path="/nexus/audit-logs" element={<ProtectedRoute><NexusAuditLogs /></ProtectedRoute>} />
+        <Route path="/nexus/settings" element={<ProtectedRoute><NexusSettings /></ProtectedRoute>} />
       </Routes>
     </Router>
   );

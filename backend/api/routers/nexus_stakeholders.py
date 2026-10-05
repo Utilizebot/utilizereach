@@ -1,7 +1,7 @@
 """
 Nexus Marketing Engine — Stakeholder Management Router
 """
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional
 import uuid
@@ -9,6 +9,8 @@ import uuid
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from database.pg import execute_sql
+from database import tenancy
+from api.dependencies import require_permission
 
 router = APIRouter(prefix="/api/v1/stakeholders", tags=["Nexus Stakeholders"])
 
@@ -21,9 +23,12 @@ class StakeholderCreate(BaseModel):
 
 @router.get("/stats")
 def get_stats():
+    # Resolve the brand OUTSIDE the try: a missing brand must fail closed, not
+    # fall through to the placeholder numbers below.
+    brand_id = tenancy.require_brand()
     try:
-        rows = execute_sql("SELECT segment_type, COUNT(*) as cnt FROM stakeholders GROUP BY segment_type", [])
-        total_rows = execute_sql("SELECT COUNT(*) as total, SUM(CASE WHEN is_active THEN 1 ELSE 0 END) as active FROM stakeholders", [])
+        rows = execute_sql("SELECT segment_type, COUNT(*) as cnt FROM stakeholders WHERE brand_id = %s GROUP BY segment_type", [brand_id])
+        total_rows = execute_sql("SELECT COUNT(*) as total, SUM(CASE WHEN is_active THEN 1 ELSE 0 END) as active FROM stakeholders WHERE brand_id = %s", [brand_id])
         seg_map = {r["segment_type"]: r["cnt"] for r in rows}
         totals = total_rows[0] if total_rows else {"total": 0, "active": 0}
         return {
@@ -43,8 +48,8 @@ def list_stakeholders(
     per_page: int = Query(20, ge=1, le=100)
 ):
     offset = (page - 1) * per_page
-    conditions = []
-    params = []
+    conditions = ["brand_id = %s"]
+    params = [tenancy.require_brand()]
     if segment and segment != "ALL":
         conditions.append("segment_type = %s::stakeholder_type")
         params.append(segment.upper())
@@ -54,7 +59,7 @@ def list_stakeholders(
     if is_active is not None:
         conditions.append("is_active = %s")
         params.append(is_active)
-    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    where = "WHERE " + " AND ".join(conditions)
     try:
         count_rows = execute_sql(f"SELECT COUNT(*) as cnt FROM stakeholders {where}", params)
         total = count_rows[0]["cnt"] if count_rows else 0
@@ -64,11 +69,12 @@ def list_stakeholders(
         return {"stakeholders": [], "total": 0, "page": page, "per_page": per_page, "pages": 0}
 
 @router.post("")
-def create_stakeholder(body: StakeholderCreate):
+def create_stakeholder(body: StakeholderCreate, _perm: dict = Depends(require_permission("leads.edit"))):
+    brand_id = tenancy.require_brand()
     try:
         rows = execute_sql(
-            "INSERT INTO stakeholders (segment_type, organization_name, primary_contact_name, email_address, phone_number) VALUES (%s::stakeholder_type, %s, %s, %s, %s) RETURNING *",
-            [body.segment_type, body.organization_name, body.primary_contact_name, body.email_address.strip().lower(), body.phone_number]
+            "INSERT INTO stakeholders (brand_id, segment_type, organization_name, primary_contact_name, email_address, phone_number) VALUES (%s, %s::stakeholder_type, %s, %s, %s, %s) RETURNING *",
+            [brand_id, body.segment_type, body.organization_name, body.primary_contact_name, body.email_address.strip().lower(), body.phone_number]
         )
         return rows[0]
     except Exception as e:
@@ -80,15 +86,15 @@ def get_audit_logs(
     action: Optional[str] = None,
     limit: int = Query(50, le=200)
 ):
-    conditions = []
-    params = []
+    conditions = ["brand_id = %s"]
+    params = [tenancy.require_brand()]
     if agent:
         conditions.append("performed_by_agent = %s::execution_agent_type")
         params.append(agent.upper())
     if action:
         conditions.append("action = %s::audit_action_type")
         params.append(action.upper())
-    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    where = "WHERE " + " AND ".join(conditions)
     try:
         rows = execute_sql(f"SELECT * FROM stakeholder_audit_logs {where} ORDER BY timestamp DESC LIMIT %s", params + [limit])
         return {"logs": rows, "total": len(rows)}
@@ -97,21 +103,22 @@ def get_audit_logs(
 
 @router.get("/{stakeholder_id}")
 def get_stakeholder(stakeholder_id: str):
+    brand_id = tenancy.require_brand()
     try:
-        rows = execute_sql("SELECT * FROM stakeholders WHERE id = %s", [stakeholder_id])
+        rows = execute_sql("SELECT * FROM stakeholders WHERE id = %s AND brand_id = %s", [stakeholder_id, brand_id])
         if not rows:
             raise HTTPException(404, "Stakeholder not found")
         s = rows[0]
         seg = s.get("segment_type", "")
         profile = None
         if seg == "SHAREHOLDER":
-            p = execute_sql("SELECT * FROM shareholder_profiles WHERE stakeholder_id = %s", [stakeholder_id])
+            p = execute_sql("SELECT * FROM shareholder_profiles WHERE stakeholder_id = %s AND brand_id = %s", [stakeholder_id, brand_id])
             profile = p[0] if p else None
         elif seg == "BUSINESS_PARTNER":
-            p = execute_sql("SELECT * FROM partner_profiles WHERE stakeholder_id = %s", [stakeholder_id])
+            p = execute_sql("SELECT * FROM partner_profiles WHERE stakeholder_id = %s AND brand_id = %s", [stakeholder_id, brand_id])
             profile = p[0] if p else None
         elif seg == "GOVT_AGENCY":
-            p = execute_sql("SELECT * FROM govt_agency_profiles WHERE stakeholder_id = %s", [stakeholder_id])
+            p = execute_sql("SELECT * FROM govt_agency_profiles WHERE stakeholder_id = %s AND brand_id = %s", [stakeholder_id, brand_id])
             profile = p[0] if p else None
         return {"stakeholder": s, "profile": profile}
     except HTTPException:
@@ -120,7 +127,7 @@ def get_stakeholder(stakeholder_id: str):
         raise HTTPException(500, str(e))
 
 @router.patch("/{stakeholder_id}")
-def update_stakeholder(stakeholder_id: str, body: dict):
+def update_stakeholder(stakeholder_id: str, body: dict, _perm: dict = Depends(require_permission("leads.edit"))):
     allowed = {"organization_name", "primary_contact_name", "phone_number", "is_active", "segment_type"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if not updates:
@@ -133,9 +140,9 @@ def update_stakeholder(stakeholder_id: str, body: dict):
         else:
             sets.append(f"{k} = %s")
         params.append(v)
-    params.append(stakeholder_id)
+    params.extend([stakeholder_id, tenancy.require_brand()])
     try:
-        rows = execute_sql(f"UPDATE stakeholders SET {', '.join(sets)}, updated_at=NOW() WHERE id=%s RETURNING *", params)
+        rows = execute_sql(f"UPDATE stakeholders SET {', '.join(sets)}, updated_at=NOW() WHERE id=%s AND brand_id=%s RETURNING *", params)
         if not rows:
             raise HTTPException(404, "Stakeholder not found")
         return rows[0]

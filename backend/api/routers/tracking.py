@@ -4,11 +4,18 @@ Tracking Router (PUBLIC — no auth)
 Form-funnel tracking endpoints used by anonymous visitors on the public
 form pages. Mirrors the direct Supabase writes the browser used to do
 (form_sessions / tracking_events / form_steps / form_responses).
+
+Multi-brand: every endpoint depends on public_brand_scope, which binds the
+brand that owns the request Host (else brand 1) - never a brand from the
+body. Inserts are therefore stamped with that brand and lookups by
+session_id only ever see that brand's rows (the composite
+(session_id, brand_id) foreign keys reject events/steps/responses that point
+at another brand's session).
 """
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Any, Dict, List, Optional
 import sys
@@ -18,8 +25,24 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from database.client import get_supabase_client
+from database.pg import execute_sql
+from database.tenancy import system_scope
+from api.dependencies import public_brand_scope
 
 router = APIRouter(prefix="/api/tracking", tags=["tracking"])
+
+
+def _session_owner(session_id: str):
+    """brand_id that owns `session_id` (session ids are globally unique), or None.
+
+    Trusted existence check only (system scope); nothing from another brand is
+    ever returned to the caller.
+    """
+    with system_scope():
+        rows = execute_sql(
+            "SELECT brand_id FROM form_sessions WHERE session_id = %s LIMIT 1", [session_id]
+        )
+    return str(rows[0]["brand_id"]) if rows else None
 
 
 class SessionUpsert(BaseModel):
@@ -91,7 +114,7 @@ class ResponseCreate(BaseModel):
 
 
 @router.post("/sessions")
-async def upsert_session(request: SessionUpsert):
+async def upsert_session(request: SessionUpsert, brand: dict = Depends(public_brand_scope)):
     """
     Create or update a form session (UPSERT ON CONFLICT session_id).
     Only fields present in the request are written, so partial upserts
@@ -99,6 +122,11 @@ async def upsert_session(request: SessionUpsert):
     """
     payload = {k: v for k, v in request.model_dump().items() if v is not None}
     try:
+        # session_id is globally unique: never let one brand's site overwrite
+        # (or take over) a session that belongs to another brand.
+        owner = _session_owner(request.session_id)
+        if owner and owner != str(brand["id"]):
+            raise HTTPException(status_code=409, detail="Session id already in use")
         client = get_supabase_client()
         result = (
             client.table("form_sessions")
@@ -106,12 +134,15 @@ async def upsert_session(request: SessionUpsert):
             .execute()
         )
         return result.data[0] if result.data else {}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to upsert session: {str(e)}")
 
 
 @router.patch("/sessions/{session_id}")
-async def update_session(session_id: str, request: SessionPatch):
+async def update_session(session_id: str, request: SessionPatch,
+                         brand: dict = Depends(public_brand_scope)):
     """Update session status/completed_at/metadata"""
     updates = {k: v for k, v in request.model_dump().items() if v is not None}
     if not updates:
@@ -132,7 +163,7 @@ async def update_session(session_id: str, request: SessionPatch):
 
 
 @router.post("/events")
-async def create_event(request: EventCreate):
+async def create_event(request: EventCreate, brand: dict = Depends(public_brand_scope)):
     """Insert a tracking event (clicks, tab switches, website_click...)"""
     payload = {k: v for k, v in request.model_dump().items() if v is not None}
     try:
@@ -144,7 +175,7 @@ async def create_event(request: EventCreate):
 
 
 @router.post("/steps")
-async def create_step(request: StepEntry):
+async def create_step(request: StepEntry, brand: dict = Depends(public_brand_scope)):
     """Track a form step entry (entered_at defaults to now())"""
     payload = {k: v for k, v in request.model_dump().items() if v is not None}
     try:
@@ -156,7 +187,7 @@ async def create_step(request: StepEntry):
 
 
 @router.post("/steps/exit")
-async def exit_step(request: StepExit):
+async def exit_step(request: StepExit, brand: dict = Depends(public_brand_scope)):
     """
     Close the latest open form_steps row for this session+step:
     sets exited_at, time_spent (seconds) and optionally answers.
@@ -202,7 +233,7 @@ async def exit_step(request: StepExit):
 
 
 @router.post("/responses")
-async def create_response(request: ResponseCreate):
+async def create_response(request: ResponseCreate, brand: dict = Depends(public_brand_scope)):
     """
     Insert a form response. A DB trigger marks the matching
     form_sessions row as completed.

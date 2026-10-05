@@ -15,8 +15,15 @@ import {
   Plus,
   CheckCircle,
   Trash2,
-  Loader2
+  Loader2,
+  Pencil,
+  Save,
+  X,
+  UserPlus,
+  Info
 } from 'lucide-react';
+import { useAuth } from '../hooks/useAuth';
+import { DEFAULT_BRAND_ID } from '../lib/config';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 
@@ -43,7 +50,19 @@ interface EmailAccount {
   status: string;
   health_score: number;
   daily_limit: number;
+  is_active?: boolean;
+  has_tokens?: boolean;
   stats: AccountStats;
+}
+
+/** Read `detail` from an API error response (FastAPI shape), else a fallback. */
+async function apiError(res: Response, fallback: string): Promise<string> {
+  try {
+    const data = await res.json();
+    if (typeof data?.detail === 'string') return data.detail;
+    if (Array.isArray(data?.detail) && data.detail[0]?.msg) return data.detail[0].msg;
+  } catch { /* not JSON */ }
+  return fallback;
 }
 
 interface AccountsSummary {
@@ -57,6 +76,12 @@ interface AccountsSummary {
 }
 
 export function EmailAccounts() {
+  const { can, activeBrand } = useAuth();
+  const canManage = can('accounts.manage');
+  const brandName = activeBrand?.display_name || '';
+  // Self-service sender personas are for non-default brands only (the default brand
+  // keeps its personas in backend/config/team_config.json).
+  const isNonDefaultBrand = !!activeBrand && activeBrand.id !== DEFAULT_BRAND_ID;
   const [searchParams, setSearchParams] = useSearchParams();
   const [accounts, setAccounts] = useState<EmailAccount[]>([]);
   const [summary, setSummary] = useState<AccountsSummary | null>(null);
@@ -90,7 +115,10 @@ export function EmailAccounts() {
         'access_denied': 'Access was denied. Please try again.',
         'no_code': 'No authorization code received.',
         'no_email': 'Could not retrieve email from Google.',
-        'callback_failed': 'OAuth callback failed. Please try again.'
+        'callback_failed': 'OAuth callback failed. Please try again.',
+        'invalid_state': 'The connect link expired - please try again.',
+        'not_allowed': 'You no longer have permission to manage mailboxes for this brand.',
+        'mailbox_in_other_brand': 'This mailbox is already connected to another brand.'
       };
       setError(errorMessages[errorParam] || `OAuth error: ${errorParam}`);
       setSearchParams({});
@@ -146,6 +174,7 @@ export function EmailAccounts() {
   }, []);
 
   const connectGmail = async () => {
+    if (!canManage) return;
     try {
       setConnecting(true);
       setError(null);
@@ -269,9 +298,16 @@ export function EmailAccounts() {
               <span className="font-medium text-sm">Refresh</span>
             </button>
 
+            {canManage && brandName && (
+              <span className="hidden sm:inline text-xs text-gray-500" title="Mailboxes you connect are added to this brand">
+                Connects to <span className="font-semibold text-gray-700">{brandName}</span>
+              </span>
+            )}
+            {canManage && (
             <button
               onClick={connectGmail}
               disabled={connecting}
+              title={brandName ? `Connect a Gmail mailbox to ${brandName}` : undefined}
               className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-red-500 to-red-600 text-white rounded-xl hover:from-red-600 hover:to-red-700 transition-all shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {connecting ? (
@@ -281,6 +317,7 @@ export function EmailAccounts() {
               )}
               <span className="font-medium text-sm">Connect Gmail</span>
             </button>
+            )}
           </div>
         </div>
       </motion.div>
@@ -339,6 +376,16 @@ export function EmailAccounts() {
             ))}
           </div>
         </motion.div>
+      )}
+
+      {/* Sender personas (send-as aliases) - non-default brands only */}
+      {isNonDefaultBrand && (
+        <SenderPersonasCard
+          personas={accounts.filter((a) => !a.has_tokens)}
+          hasBaseMailbox={accounts.some((a) => a.has_tokens)}
+          canManage={canManage}
+          onChanged={fetchData}
+        />
       )}
 
       {/* Open Rate Disclaimer */}
@@ -416,6 +463,7 @@ export function EmailAccounts() {
               delay={0.4 + index * 0.1}
               onDisconnect={disconnectAccount}
               isDisconnecting={disconnecting === account.id}
+              canManage={canManage}
             />
           ))}
         </div>
@@ -433,6 +481,7 @@ export function EmailAccounts() {
           <p className="text-gray-600 mb-6 max-w-md mx-auto">
             Connect your Gmail account to start sending personalized AI-generated emails to your leads.
           </p>
+          {canManage && (
           <button
             onClick={connectGmail}
             disabled={connecting}
@@ -445,6 +494,12 @@ export function EmailAccounts() {
             )}
             <span className="font-medium">Connect Gmail Account</span>
           </button>
+          )}
+          {canManage && brandName && (
+            <p className="text-xs text-gray-500 mt-3">
+              The mailbox will be connected to <span className="font-semibold text-gray-700">{brandName}</span>
+            </p>
+          )}
         </motion.div>
       )}
 
@@ -560,9 +615,10 @@ interface AccountCardProps {
   delay: number;
   onDisconnect: (accountId: string, email: string) => void;
   isDisconnecting: boolean;
+  canManage: boolean;
 }
 
-function AccountCard({ account, delay, onDisconnect, isDisconnecting }: AccountCardProps) {
+function AccountCard({ account, delay, onDisconnect, isDisconnecting, canManage }: AccountCardProps) {
   const usagePercent = (account.stats.sent_today / account.daily_limit) * 100;
 
   const getStatusColor = (status: string) => {
@@ -617,6 +673,7 @@ function AccountCard({ account, delay, onDisconnect, isDisconnecting }: AccountC
           <span className={`px-3 py-1 rounded-full text-xs font-semibold border ${getStatusColor(account.status)}`}>
             {account.status}
           </span>
+          {canManage && (
           <button
             onClick={() => onDisconnect(account.id, account.email)}
             disabled={isDisconnecting}
@@ -629,6 +686,7 @@ function AccountCard({ account, delay, onDisconnect, isDisconnecting }: AccountC
               <Trash2 className="h-4 w-4" />
             )}
           </button>
+          )}
         </div>
       </div>
 
@@ -723,6 +781,341 @@ function AccountCard({ account, delay, onDisconnect, isDisconnecting }: AccountC
           <span className="text-lg font-bold text-purple-700">{account.stats.sent_this_week}</span>
         </div>
       </div>
+    </motion.div>
+  );
+}
+
+// ============================================================================
+// Sender personas (send-as aliases of the brand's connected mailbox)
+// ============================================================================
+
+interface SenderPersonasCardProps {
+  personas: EmailAccount[];
+  hasBaseMailbox: boolean;
+  canManage: boolean;
+  onChanged: () => void | Promise<void>;
+}
+
+const EMPTY_PERSONA_FORM = {
+  email: '',
+  sender_name: '',
+  sender_title: '',
+  persona: '',
+  focus_area: '',
+  daily_limit: '50'
+};
+
+const inputClass =
+  'w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent';
+
+function SenderPersonasCard({ personas, hasBaseMailbox, canManage, onChanged }: SenderPersonasCardProps) {
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState(EMPTY_PERSONA_FORM);
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [edit, setEdit] = useState({ sender_name: '', sender_title: '', daily_limit: '' });
+  const [rowBusy, setRowBusy] = useState<string | null>(null);
+  const [rowError, setRowError] = useState<{ id: string; message: string } | null>(null);
+
+  useEffect(() => {
+    if (notice) {
+      const t = setTimeout(() => setNotice(null), 4000);
+      return () => clearTimeout(t);
+    }
+  }, [notice]);
+
+  const addPersona = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setFormError(null);
+    const limit = parseInt(form.daily_limit, 10);
+    if (!form.email.trim() || !form.sender_name.trim()) {
+      setFormError('Email and name are required.');
+      return;
+    }
+    if (!Number.isFinite(limit) || limit < 1) {
+      setFormError('Daily limit must be a positive number.');
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/email-accounts/personas`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: form.email.trim(),
+          sender_name: form.sender_name.trim(),
+          sender_title: form.sender_title.trim() || null,
+          persona: form.persona.trim() || null,
+          focus_area: form.focus_area.trim() || null,
+          daily_limit: limit
+        })
+      });
+      if (!res.ok) throw new Error(await apiError(res, 'Failed to add persona'));
+      setNotice(`Added ${form.email.trim().toLowerCase()}`);
+      setForm(EMPTY_PERSONA_FORM);
+      setShowForm(false);
+      await onChanged();
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Failed to add persona');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const patchPersona = async (id: string, body: Record<string, unknown>) => {
+    setRowBusy(id);
+    setRowError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/email-accounts/personas/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) throw new Error(await apiError(res, 'Failed to update persona'));
+      await onChanged();
+      return true;
+    } catch (err) {
+      setRowError({ id, message: err instanceof Error ? err.message : 'Failed to update persona' });
+      return false;
+    } finally {
+      setRowBusy(null);
+    }
+  };
+
+  const startEdit = (p: EmailAccount) => {
+    setRowError(null);
+    setEditingId(p.id);
+    setEdit({
+      sender_name: p.sender_name || '',
+      sender_title: p.sender_title || '',
+      daily_limit: String(p.daily_limit ?? 50)
+    });
+  };
+
+  const saveEdit = async (id: string) => {
+    const limit = parseInt(edit.daily_limit, 10);
+    if (!edit.sender_name.trim()) {
+      setRowError({ id, message: 'Name is required.' });
+      return;
+    }
+    if (!Number.isFinite(limit) || limit < 1) {
+      setRowError({ id, message: 'Daily limit must be a positive number.' });
+      return;
+    }
+    const ok = await patchPersona(id, {
+      sender_name: edit.sender_name.trim(),
+      sender_title: edit.sender_title.trim() || null,
+      daily_limit: limit
+    });
+    if (ok) setEditingId(null);
+  };
+
+  return (
+    <motion.div
+      className="mb-6 bg-white border border-gray-200 rounded-2xl p-6 shadow-sm"
+      initial={{ opacity: 0, y: -10 }}
+      animate={{ opacity: 1, y: 0 }}
+    >
+      <div className="flex items-center justify-between gap-3 mb-1">
+        <div className="flex items-center gap-3">
+          <div className="h-9 w-9 bg-gradient-to-br from-purple-600 to-indigo-600 rounded-lg flex items-center justify-center shadow">
+            <UserPlus className="h-5 w-5 text-white" />
+          </div>
+          <div>
+            <h2 className="text-xl font-bold text-gray-900">Sender personas</h2>
+            <p className="text-gray-500 text-xs">
+              Send-as identities on this brand's connected Gmail mailbox
+            </p>
+          </div>
+        </div>
+        {canManage && !showForm && (
+          <button
+            onClick={() => { setShowForm(true); setFormError(null); }}
+            className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 text-white rounded-xl hover:shadow-lg transition-all"
+          >
+            <Plus className="h-4 w-4" />
+            <span className="font-medium text-sm">Add persona</span>
+          </button>
+        )}
+      </div>
+
+      <div className="mt-3 flex items-start gap-2 text-xs text-gray-600 bg-purple-50 border border-purple-100 rounded-lg px-3 py-2">
+        <Info className="h-4 w-4 text-purple-600 flex-shrink-0" />
+        <span>Add this address as a 'Send mail as' alias in the brand's Gmail settings first, then add it here.</span>
+      </div>
+
+      {!hasBaseMailbox && canManage && (
+        <p className="mt-2 text-xs text-amber-700">
+          Connect the brand's Gmail mailbox first (use "Connect Gmail" above) before adding personas.
+        </p>
+      )}
+
+      {notice && (
+        <div className="mt-3 flex items-center gap-2 text-sm text-emerald-700">
+          <CheckCircle className="h-4 w-4" /> {notice}
+        </div>
+      )}
+
+      {canManage && showForm && (
+        <form onSubmit={addPersona} className="mt-4 p-4 bg-gray-50 border border-gray-200 rounded-xl">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            <label className="block">
+              <span className="text-xs font-semibold text-gray-600">Email (send-as alias) *</span>
+              <input type="email" required className={inputClass} value={form.email}
+                placeholder="jane@yourbrand.com"
+                onChange={(e) => setForm({ ...form, email: e.target.value })} />
+            </label>
+            <label className="block">
+              <span className="text-xs font-semibold text-gray-600">Name *</span>
+              <input type="text" required maxLength={100} className={inputClass} value={form.sender_name}
+                placeholder="Jane Doe"
+                onChange={(e) => setForm({ ...form, sender_name: e.target.value })} />
+            </label>
+            <label className="block">
+              <span className="text-xs font-semibold text-gray-600">Title</span>
+              <input type="text" maxLength={200} className={inputClass} value={form.sender_title}
+                placeholder="Account Executive"
+                onChange={(e) => setForm({ ...form, sender_title: e.target.value })} />
+            </label>
+            <label className="block">
+              <span className="text-xs font-semibold text-gray-600">Style / persona</span>
+              <input type="text" className={inputClass} value={form.persona}
+                placeholder="warm, concise, consultative"
+                onChange={(e) => setForm({ ...form, persona: e.target.value })} />
+            </label>
+            <label className="block">
+              <span className="text-xs font-semibold text-gray-600">Focus</span>
+              <input type="text" className={inputClass} value={form.focus_area}
+                placeholder="retail, SMEs"
+                onChange={(e) => setForm({ ...form, focus_area: e.target.value })} />
+            </label>
+            <label className="block">
+              <span className="text-xs font-semibold text-gray-600">Daily limit</span>
+              <input type="number" min={1} className={inputClass} value={form.daily_limit}
+                onChange={(e) => setForm({ ...form, daily_limit: e.target.value })} />
+            </label>
+          </div>
+          {formError && (
+            <p className="mt-3 text-sm text-red-600 flex items-center gap-1.5">
+              <XCircle className="h-4 w-4" /> {formError}
+            </p>
+          )}
+          <div className="mt-4 flex items-center gap-2">
+            <button type="submit" disabled={saving}
+              className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-xl hover:shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed">
+              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+              <span className="font-medium text-sm">Save persona</span>
+            </button>
+            <button type="button" disabled={saving}
+              onClick={() => { setShowForm(false); setForm(EMPTY_PERSONA_FORM); setFormError(null); }}
+              className="px-4 py-2 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 transition-colors text-sm font-medium">
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+
+      {personas.length === 0 ? (
+        <p className="mt-4 text-sm text-gray-500">
+          No sender personas yet - campaigns send as the connected mailbox itself.
+        </p>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mt-4">
+          {personas.map((p) => {
+            const active = p.is_active !== false;
+            const isEditing = editingId === p.id;
+            const busy = rowBusy === p.id;
+            return (
+              <div key={p.id}
+                className={`border rounded-xl p-4 transition-colors ${active ? 'border-gray-200 hover:border-purple-300' : 'border-gray-200 bg-gray-50 opacity-75'}`}>
+                {isEditing ? (
+                  <div className="space-y-2">
+                    <input type="text" maxLength={100} className={inputClass} value={edit.sender_name}
+                      placeholder="Name" onChange={(e) => setEdit({ ...edit, sender_name: e.target.value })} />
+                    <input type="text" maxLength={200} className={inputClass} value={edit.sender_title}
+                      placeholder="Title" onChange={(e) => setEdit({ ...edit, sender_title: e.target.value })} />
+                    <label className="flex items-center gap-2 text-xs text-gray-600">
+                      Daily limit
+                      <input type="number" min={1} className={inputClass} value={edit.daily_limit}
+                        onChange={(e) => setEdit({ ...edit, daily_limit: e.target.value })} />
+                    </label>
+                    <div className="flex items-center gap-2 pt-1">
+                      <button onClick={() => saveEdit(p.id)} disabled={busy}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-lg text-xs font-medium disabled:opacity-50">
+                        {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />} Save
+                      </button>
+                      <button onClick={() => { setEditingId(null); setRowError(null); }} disabled={busy}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-medium hover:bg-gray-50">
+                        <X className="h-3.5 w-3.5" /> Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="h-10 w-10 rounded-full bg-gradient-to-br from-purple-100 to-indigo-100 flex items-center justify-center text-purple-700 font-semibold flex-shrink-0">
+                          {(p.sender_name || p.email || '?').charAt(0).toUpperCase()}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="font-semibold text-gray-900 truncate">{p.sender_name || p.email}</p>
+                          <p className="text-xs text-gray-500 truncate">{p.sender_title || 'Team Member'}</p>
+                        </div>
+                      </div>
+                      {canManage && (
+                        <button onClick={() => startEdit(p)} disabled={busy}
+                          className="p-1.5 text-gray-400 hover:text-purple-600 hover:bg-purple-50 rounded-lg transition-colors"
+                          title="Edit persona">
+                          <Pencil className="h-4 w-4" />
+                        </button>
+                      )}
+                    </div>
+                    <div className="mt-3 flex items-center gap-1.5 text-sm text-gray-700">
+                      <Mail className="h-3.5 w-3.5 text-gray-400 flex-shrink-0" />
+                      <span className="truncate">{p.email}</span>
+                    </div>
+                    {(p.persona || p.focus_area) && (
+                      <p className="mt-2 text-xs text-gray-500 line-clamp-2">
+                        {[p.persona, p.focus_area].filter(Boolean).join(' · ')}
+                      </p>
+                    )}
+                    <div className="mt-3 flex items-center justify-between">
+                      <span className="text-xs text-gray-600">
+                        Daily limit <span className="font-semibold text-gray-900">{p.daily_limit}</span>
+                      </span>
+                      {canManage ? (
+                        <button
+                          onClick={() => patchPersona(p.id, { is_active: !active })}
+                          disabled={busy}
+                          title={active ? 'Deactivate persona' : 'Activate persona'}
+                          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border transition-colors disabled:opacity-50 ${active
+                            ? 'bg-emerald-100 text-emerald-700 border-emerald-200 hover:bg-emerald-200'
+                            : 'bg-gray-100 text-gray-600 border-gray-200 hover:bg-gray-200'}`}
+                        >
+                          {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                          {active ? 'Active' : 'Inactive'}
+                        </button>
+                      ) : (
+                        <span className={`px-2.5 py-1 rounded-full text-xs font-semibold border ${active
+                          ? 'bg-emerald-100 text-emerald-700 border-emerald-200'
+                          : 'bg-gray-100 text-gray-600 border-gray-200'}`}>
+                          {active ? 'Active' : 'Inactive'}
+                        </span>
+                      )}
+                    </div>
+                  </>
+                )}
+                {rowError?.id === p.id && (
+                  <p className="mt-2 text-xs text-red-600">{rowError.message}</p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </motion.div>
   );
 }

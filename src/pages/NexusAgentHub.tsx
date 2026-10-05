@@ -386,7 +386,7 @@ function LiveStream({ agentFilter, onFilterChange }: LiveStreamProps) {
 
     const connect = () => {
       try {
-        const es = new EventSource('/api/v1/agents/stream');
+        const es = new EventSource(`/api/v1/agents/stream?token=${encodeURIComponent(localStorage.getItem('auth_token') ?? '')}`); // EventSource can't send headers
         esRef.current = es;
 
         es.onopen = () => {

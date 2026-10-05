@@ -5,6 +5,7 @@
  *
  * Phase: 1.10 - Settings Page Layout
  * Created: 2025-10-16
+ * Updated: multi-brand - nav gated by permission, active brand + role shown
  */
 
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
@@ -23,7 +24,9 @@ import {
   Upload,
   Users,
   Clock,
-  Sparkles
+  Sparkles,
+  Building2,
+  Layers
 } from 'lucide-react';
 import { useAuth } from '../../hooks/useAuth';
 
@@ -32,6 +35,7 @@ interface NavItem {
   label: string;
   icon: React.ReactNode;
   permission?: string; // hidden unless the current user holds this permission
+  platformAdminOnly?: boolean; // hidden unless the user is a platform admin
 }
 
 const navItems: NavItem[] = [
@@ -39,6 +43,12 @@ const navItems: NavItem[] = [
     path: '/settings/profile',
     label: 'Profile',
     icon: <User size={20} />,
+  },
+  {
+    path: '/settings/brand',
+    label: 'Brand',
+    icon: <Building2 size={20} />,
+    permission: 'settings.manage',
   },
   {
     path: '/settings/users',
@@ -73,6 +83,12 @@ const navItems: NavItem[] = [
     path: '/settings/export',
     label: 'Export Formats',
     icon: <FileDown size={20} />,
+  },
+  {
+    path: '/settings/brands',
+    label: 'Brands',
+    icon: <Layers size={20} />,
+    platformAdminOnly: true,
   },
 ];
 
@@ -116,14 +132,27 @@ const quickNavItems = [
   },
 ];
 
+const ROLE_LABELS: Record<string, string> = {
+  admin: 'Admin',
+  manager: 'Manager',
+  member: 'Member',
+  sales_rep: 'Member',
+  viewer: 'Viewer',
+};
+
 export function SettingsLayout() {
   const navigate = useNavigate();
-  const { salesRep, isAdmin, can } = useAuth();
+  const { salesRep, isAdmin, can, isPlatformAdmin, activeBrand, brands } = useAuth();
 
-  // Filter nav items based on the current user's permissions
-  const visibleNavItems = navItems.filter(
-    item => !item.permission || can(item.permission)
-  );
+  // Filter nav items based on the current user's permissions in the active brand
+  const visibleNavItems = navItems.filter((item) => {
+    if (item.platformAdminOnly) return isPlatformAdmin;
+    return !item.permission || can(item.permission);
+  });
+
+  const roleText = isPlatformAdmin
+    ? 'Platform Admin'
+    : ROLE_LABELS[activeBrand?.role || ''] || (isAdmin ? 'Admin' : 'Member');
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-blue-50">
@@ -170,7 +199,10 @@ export function SettingsLayout() {
                   {salesRep?.full_name}
                 </p>
                 <p className="text-xs text-gray-600">
-                  {salesRep?.role_label || (isAdmin ? 'Administrator' : 'Member')}
+                  {roleText}
+                  {activeBrand?.display_name && (
+                    <span className="text-gray-400"> · {activeBrand.display_name}</span>
+                  )}
                 </p>
               </div>
             </div>
@@ -188,6 +220,20 @@ export function SettingsLayout() {
               initial={{ opacity: 0, x: -20 }}
               animate={{ opacity: 1, x: 0 }}
             >
+              {/* Active brand */}
+              {activeBrand && (
+                <div className="mb-4 px-4 py-3 rounded-xl bg-gradient-to-br from-indigo-50 to-purple-50 border border-indigo-100">
+                  <p className="text-[10px] font-semibold text-indigo-500 uppercase tracking-wider">
+                    Active brand{(brands?.length ?? 0) > 1 ? ` · 1 of ${brands.length}` : ''}
+                  </p>
+                  <p className="text-sm font-bold text-gray-900 truncate flex items-center gap-1.5 mt-0.5">
+                    <Building2 size={14} className="text-indigo-600 flex-shrink-0" />
+                    {activeBrand.display_name}
+                  </p>
+                  <p className="text-xs text-gray-600 mt-0.5">Your role: {roleText}</p>
+                </div>
+              )}
+
               <div className="space-y-1">
                 {visibleNavItems.map((item) => (
                   <NavLink
@@ -231,9 +277,11 @@ export function SettingsLayout() {
               {/* Navigation Helper */}
               <div className="mt-6 pt-6 border-t border-gray-200">
                 <p className="text-xs text-gray-500 px-4">
-                  {isAdmin
-                    ? 'You have full administrative access'
-                    : 'Some settings are admin-only'}
+                  {isPlatformAdmin
+                    ? 'You have platform-wide administrative access'
+                    : isAdmin
+                      ? 'You have full administrative access to this brand'
+                      : 'Some settings are admin-only'}
                 </p>
               </div>
             </motion.nav>

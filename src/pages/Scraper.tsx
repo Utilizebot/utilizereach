@@ -22,7 +22,8 @@ import { useAuth } from '../hooks/useAuth';
 import { JobHistory } from '../components/JobHistory';
 
 export function Scraper() {
-  const { isAuthenticated, initializing } = useAuth();
+  const { isAuthenticated, initializing, can } = useAuth();
+  const canRun = can('scraper.run');
 
   // Form state
   const [formData, setFormData] = useState({
@@ -39,6 +40,7 @@ export function Scraper() {
   // Handle form submission
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canRun) return;
     setError('');
     setSuccess('');
     setLoading(true);
@@ -320,7 +322,8 @@ export function Scraper() {
           {/* Submit Button */}
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || !canRun}
+            title={canRun ? undefined : 'You do not have permission to run the scraper'}
             className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-orange-600 to-red-600 text-white rounded-xl font-semibold text-lg hover:shadow-lg hover:shadow-orange-500/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {loading ? (

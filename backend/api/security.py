@@ -52,14 +52,21 @@ def get_jwt_expires_days() -> int:
         return 7
 
 
-def create_access_token(user_id: str, email: str, role: str) -> str:
-    """Create a signed JWT for a sales rep."""
+def create_access_token(user_id: str, email: str, role: str, brand_id: str | None = None) -> str:
+    """Create a signed JWT for a sales rep.
+
+    `brand` is the brand the session acts in. It is a request for that brand,
+    not proof of access: get_current_user() re-checks brand membership on
+    every request.
+    """
     payload = {
         "sub": str(user_id),
         "email": email,
         "role": role,
         "exp": datetime.now(timezone.utc) + timedelta(days=get_jwt_expires_days()),
     }
+    if brand_id:
+        payload["brand"] = str(brand_id)
     return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
 
 

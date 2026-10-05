@@ -5,12 +5,21 @@ Generic sales-assistant chatbot for the lead-capture site. The persona is
 built at request time from the tenant's email_ai_settings (company name,
 tagline, services, CTA links) and replies are generated through the
 multi-provider LLM client (integrations.llm_client).
+
+Multi-brand: this is a PUBLIC endpoint (website widget, no JWT). The brand is
+the one that owns the request Host (else brand 1) via
+Depends(public_brand_scope) - never taken from the request body. The persona
+and the LLM provider come from THAT brand's email_ai_settings row. Mount this
+router WITHOUT the auth dependency.
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from typing import List, Optional
+
+from api.dependencies import public_brand_scope
+from database.tenancy import brand_scope
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
@@ -30,8 +39,9 @@ class ChatResponse(BaseModel):
     reply: str
 
 
-def _get_company_settings() -> dict:
-    """Load company info from the email_ai_settings table (neutral fallbacks)."""
+def _get_company_settings(brand: Optional[dict] = None) -> dict:
+    """Load the active brand's company info from its email_ai_settings row
+    (auto-scoped to the active brand; neutral fallbacks)."""
     settings = {}
     try:
         from database.client import get_supabase_admin_client
@@ -48,7 +58,7 @@ def _get_company_settings() -> dict:
         print(f"[Chat] Could not load email_ai_settings: {e}")
 
     return {
-        "company_name": settings.get("company_name") or "our company",
+        "company_name": settings.get("company_name") or (brand or {}).get("display_name") or "our company",
         "company_tagline": settings.get("company_tagline") or "",
         "company_services": settings.get("company_services") or "",
         "cta_link_1_label": settings.get("cta_link_1_label") or "Schedule a Call",
@@ -97,11 +107,20 @@ TONE & STYLE:
 - End with an invitation to connect with the team when it feels natural"""
 
 
-def _generate_reply(message: str, history: List[dict]) -> str:
-    """Build the prompt (persona + chat history) and run it through the LLM."""
+def _generate_reply(message: str, history: List[dict], brand: dict) -> str:
+    """Build the prompt (persona + chat history) and run it through the LLM.
+
+    Runs in a worker thread: the brand is re-bound explicitly so the settings
+    read and the LLM client both use THIS brand's email_ai_settings.
+    """
+    with brand_scope(brand["id"]):
+        return _generate_reply_in_brand(message, history, brand)
+
+
+def _generate_reply_in_brand(message: str, history: List[dict], brand: dict) -> str:
     from integrations.llm_client import get_llm_client
 
-    company = _get_company_settings()
+    company = _get_company_settings(brand)
     persona = _build_system_persona(company)
 
     lines = [persona, "", "CONVERSATION SO FAR:"]
@@ -124,7 +143,7 @@ def _generate_reply(message: str, history: List[dict]) -> str:
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, brand: dict = Depends(public_brand_scope)):
     """
     Website chat assistant endpoint.
 
@@ -133,7 +152,7 @@ async def chat(request: ChatRequest):
     """
     try:
         reply = await run_in_threadpool(
-            _generate_reply, request.message, request.history or []
+            _generate_reply, request.message, request.history or [], brand
         )
         if not reply:
             return ChatResponse(reply=FALLBACK_REPLY)

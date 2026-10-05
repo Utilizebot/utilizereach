@@ -1,24 +1,68 @@
 """
 Scheduler Router
 API endpoints for automated campaign scheduler settings and control
+
+Multi-brand: scheduler_settings holds ONE row per brand (unique brand_id) and
+scheduler_run_history is per brand. Every endpoint runs in an authenticated
+request, so the query-builder calls below are scoped to the active brand.
+When the active brand has no settings row yet, one is created from safe
+defaults (another brand's row is never read). run-now enqueues the Celery
+task with the active brand's id.
 """
 
-from fastapi import APIRouter, HTTPException, Depends
-
-from api.dependencies import require_permission
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, timedelta
 import pytz
 
 from database.client import get_supabase_admin_client
+from database.pg import execute_sql
+from database import tenancy
+from api.dependencies import require_permission
 
 router = APIRouter(prefix="/api/scheduler", tags=["Scheduler"])
+
+# Safe defaults for a brand that has no scheduler_settings row yet
+DEFAULT_SCHEDULER_SETTINGS = {
+    'is_enabled': False,
+    'daily_limit': 30,
+    'send_hour': 10,
+    'send_minute': 0,
+    'timezone': 'Asia/Kuala_Lumpur',
+    'delay_between_emails': 60,
+    'total_runs': 0,
+    'total_emails_sent': 0
+}
 
 
 def get_supabase():
     """Get database client"""
     return get_supabase_admin_client()
+
+
+def _create_settings_row() -> Optional[dict]:
+    """Create the ACTIVE brand's scheduler_settings row (race-safe, one per brand)."""
+    brand_id = tenancy.require_brand()
+    cols = list(DEFAULT_SCHEDULER_SETTINGS.keys())
+    rows = execute_sql(
+        f"INSERT INTO scheduler_settings (brand_id, {', '.join(cols)}) "
+        f"VALUES (%s, {', '.join(['%s'] * len(cols))}) "
+        "ON CONFLICT (brand_id) DO NOTHING RETURNING *",
+        [brand_id] + [DEFAULT_SCHEDULER_SETTINGS[c] for c in cols],
+    )
+    if rows:
+        return rows[0]
+    result = get_supabase().table('scheduler_settings').select('*').limit(1).execute()
+    return result.data[0] if result.data else None
+
+
+def _get_or_create_settings() -> Optional[dict]:
+    """The active brand's scheduler_settings row, created on first use."""
+    result = get_supabase().table('scheduler_settings').select('*').limit(1).execute()
+    if result.data:
+        return result.data[0]
+    return _create_settings_row()
 
 
 class SchedulerSettingsUpdate(BaseModel):
@@ -30,7 +74,7 @@ class SchedulerSettingsUpdate(BaseModel):
 
 
 @router.get("/settings")
-async def get_scheduler_settings():
+async def get_scheduler_settings(current_user: dict = Depends(require_permission("settings.view"))):
     """
     Get current scheduler settings
 
@@ -47,19 +91,9 @@ async def get_scheduler_settings():
         result = supabase.table('scheduler_settings').select('*').limit(1).execute()
 
         if not result.data:
-            # Create default settings if none exist
-            default_settings = {
-                'is_enabled': False,
-                'daily_limit': 30,
-                'send_hour': 10,
-                'send_minute': 0,
-                'timezone': 'Asia/Kuala_Lumpur',
-                'delay_between_emails': 60,
-                'total_runs': 0,
-                'total_emails_sent': 0
-            }
-            supabase.table('scheduler_settings').insert(default_settings).execute()
-            return default_settings
+            # Create default settings for this brand if none exist
+            _create_settings_row()
+            return dict(DEFAULT_SCHEDULER_SETTINGS)
 
         return result.data[0]
 
@@ -68,7 +102,8 @@ async def get_scheduler_settings():
 
 
 @router.put("/settings")
-async def update_scheduler_settings(settings: SchedulerSettingsUpdate, _perm: dict = Depends(require_permission("settings.manage"))):
+async def update_scheduler_settings(settings: SchedulerSettingsUpdate,
+                                    current_user: dict = Depends(require_permission("settings.manage"))):
     """
     Update scheduler settings
 
@@ -82,13 +117,11 @@ async def update_scheduler_settings(settings: SchedulerSettingsUpdate, _perm: di
     try:
         supabase = get_supabase()
 
-        # Get current settings
-        current = supabase.table('scheduler_settings').select('*').limit(1).execute()
+        # Get current settings (this brand's row; created on first use)
+        config = _get_or_create_settings()
 
-        if not current.data:
+        if not config:
             raise HTTPException(status_code=404, detail="Scheduler settings not found")
-
-        config = current.data[0]
 
         # Build update data
         update_data = {'updated_at': datetime.utcnow().isoformat()}
@@ -154,7 +187,7 @@ async def update_scheduler_settings(settings: SchedulerSettingsUpdate, _perm: di
 
 
 @router.post("/toggle")
-async def toggle_scheduler(enable: bool, _perm: dict = Depends(require_permission("settings.manage"))):
+async def toggle_scheduler(enable: bool, current_user: dict = Depends(require_permission("settings.manage"))):
     """
     Quick toggle to enable/disable the scheduler
 
@@ -164,13 +197,11 @@ async def toggle_scheduler(enable: bool, _perm: dict = Depends(require_permissio
     try:
         supabase = get_supabase()
 
-        # Get current settings
-        current = supabase.table('scheduler_settings').select('*').limit(1).execute()
+        # Get current settings (this brand's row; created on first use)
+        config = _get_or_create_settings()
 
-        if not current.data:
+        if not config:
             raise HTTPException(status_code=404, detail="Scheduler settings not found")
-
-        config = current.data[0]
 
         update_data = {
             'is_enabled': enable,
@@ -209,7 +240,7 @@ async def toggle_scheduler(enable: bool, _perm: dict = Depends(require_permissio
 
 
 @router.post("/run-now")
-async def trigger_manual_run(_perm: dict = Depends(require_permission("settings.manage"))):
+async def trigger_manual_run(current_user: dict = Depends(require_permission("settings.manage"))):
     """
     Manually trigger the scheduled campaign immediately
 
@@ -230,8 +261,8 @@ async def trigger_manual_run(_perm: dict = Depends(require_permission("settings.
                 detail="Scheduler is disabled. Enable it first to run manually."
             )
 
-        # Trigger task asynchronously
-        task = send_daily_campaign.delay()
+        # Trigger task asynchronously, for THIS brand only
+        task = send_daily_campaign.delay(brand_id=tenancy.require_brand())
 
         return {
             'success': True,
@@ -246,7 +277,7 @@ async def trigger_manual_run(_perm: dict = Depends(require_permission("settings.
 
 
 @router.get("/history")
-async def get_run_history(limit: int = 10):
+async def get_run_history(limit: int = 10, current_user: dict = Depends(require_permission("settings.view"))):
     """
     Get recent scheduler run history
 
@@ -281,7 +312,7 @@ async def get_run_history(limit: int = 10):
 
 
 @router.get("/status")
-async def get_scheduler_status():
+async def get_scheduler_status(current_user: dict = Depends(require_permission("settings.view"))):
     """
     Get current scheduler status summary
 
@@ -337,25 +368,32 @@ async def get_scheduler_status():
 
 
 @router.delete("/history/{run_id}")
-async def delete_run_history(run_id: str, _perm: dict = Depends(require_permission("settings.manage"))):
+async def delete_run_history(run_id: str, current_user: dict = Depends(require_permission("settings.manage"))):
     """Delete a specific run history record"""
     try:
         supabase = get_supabase()
-        supabase.table('scheduler_run_history').delete().eq('id', run_id).execute()
+        # Auto-scoped to the active brand: another brand's (or an unknown)
+        # id deletes nothing -> 404.
+        result = supabase.table('scheduler_run_history').delete().eq('id', run_id).execute()
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Run history record not found")
 
         return {'success': True, 'message': 'Run history deleted'}
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete history: {str(e)}")
 
 
 @router.delete("/history")
-async def clear_run_history(_perm: dict = Depends(require_permission("settings.manage"))):
-    """Clear all run history records"""
+async def clear_run_history(current_user: dict = Depends(require_permission("settings.manage"))):
+    """Clear all of the active brand's run history records"""
     try:
         supabase = get_supabase()
 
-        # Delete all records (Supabase requires a filter, so we use a condition that's always true)
+        # Delete all of this brand's records (the builder ANDs brand_id in;
+        # it also requires a filter, so we use a condition that's always true)
         result = supabase.table('scheduler_run_history')\
             .delete()\
             .neq('id', '00000000-0000-0000-0000-000000000000')\

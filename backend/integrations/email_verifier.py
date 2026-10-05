@@ -301,7 +301,7 @@ class EmailVerifier:
 if __name__ == "__main__":
     # Test emails
     test_emails = [
-        "someone@gmail.com",  # Valid
+        "someone@example.org",  # Valid
         "invalid@nonexistentdomain12345.com",  # Invalid domain
         "test@tempmail.com",  # Disposable
         "not-an-email",  # Invalid syntax
