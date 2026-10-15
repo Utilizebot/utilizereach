@@ -20,6 +20,7 @@ import {
   Plus,
   Trash2,
   ChevronLeft,
+  Search,
   ChevronRight,
   Mail,
   UserPlus,
@@ -112,6 +113,9 @@ export function LeadsManagement() {
   const [exclusions, setExclusions] = useState<Exclusion[]>([]);
   const [newExclusion, setNewExclusion] = useState('');
   const [addingExclusion, setAddingExclusion] = useState(false);
+  const [exclusionSearch, setExclusionSearch] = useState('');
+  const [exclusionPage, setExclusionPage] = useState(1);
+  const exclusionsPerPage = 20;
 
   // Column mapping states
   const [showMappingModal, setShowMappingModal] = useState(false);
@@ -1181,6 +1185,23 @@ export function LeadsManagement() {
     setCurrentPage(Math.max(1, Math.min(totalPages, page)));
   };
 
+  // Exclusions pagination (search by email or reason, then page)
+  const exclusionQuery = exclusionSearch.trim().toLowerCase();
+  const filteredExclusions = exclusionQuery
+    ? exclusions.filter(x =>
+        x.email.toLowerCase().includes(exclusionQuery) ||
+        (x.reason || '').toLowerCase().includes(exclusionQuery))
+    : exclusions;
+  const exclusionTotalPages = Math.max(1, Math.ceil(filteredExclusions.length / exclusionsPerPage));
+  const exclusionPageSafe = Math.min(exclusionPage, exclusionTotalPages);
+  const exclusionStart = (exclusionPageSafe - 1) * exclusionsPerPage;
+  const exclusionEnd = Math.min(exclusionStart + exclusionsPerPage, filteredExclusions.length);
+  const paginatedExclusions = filteredExclusions.slice(exclusionStart, exclusionEnd);
+
+  const goToExclusionPage = (page: number) => {
+    setExclusionPage(Math.max(1, Math.min(exclusionTotalPages, page)));
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 flex items-center justify-center">
@@ -1590,10 +1611,28 @@ export function LeadsManagement() {
           </button>
         </div>
 
+        {/* Search */}
+        {exclusions.length > 0 && (
+          <div className="mb-4 relative">
+            <Search className="h-4 w-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="search"
+              value={exclusionSearch}
+              onChange={(e) => { setExclusionSearch(e.target.value); setExclusionPage(1); }}
+              placeholder="Search excluded emails or reasons..."
+              className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent"
+            />
+          </div>
+        )}
+
         {/* Exclusions List */}
-        {exclusions.length > 0 ? (
+        {exclusions.length > 0 && filteredExclusions.length === 0 ? (
+          <div className="text-center py-8 text-gray-500">
+            <p>No exclusions match "{exclusionSearch}"</p>
+          </div>
+        ) : exclusions.length > 0 ? (
           <div className="space-y-2">
-            {exclusions.map((exclusion) => (
+            {paginatedExclusions.map((exclusion) => (
               <div
                 key={exclusion.id}
                 className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-200"
@@ -1617,6 +1656,66 @@ export function LeadsManagement() {
                 )}
               </div>
             ))}
+
+            {/* Pagination Controls */}
+            {exclusionTotalPages > 1 && (
+              <div className="pt-4 mt-2 border-t border-gray-200 flex items-center justify-between">
+                <div className="text-sm text-gray-600">
+                  Showing {exclusionStart + 1} to {exclusionEnd} of {filteredExclusions.length} exclusions
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => goToExclusionPage(exclusionPageSafe - 1)}
+                    disabled={exclusionPageSafe === 1}
+                    className="flex items-center gap-1 px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent text-sm font-medium"
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                    Previous
+                  </button>
+
+                  <div className="flex items-center gap-1">
+                    {Array.from({ length: exclusionTotalPages }, (_, i) => i + 1).map((page) => {
+                      // Show first page, last page, current page, and pages around current
+                      const showPage =
+                        page === 1 ||
+                        page === exclusionTotalPages ||
+                        (page >= exclusionPageSafe - 1 && page <= exclusionPageSafe + 1);
+
+                      if (!showPage) {
+                        if (page === exclusionPageSafe - 2 || page === exclusionPageSafe + 2) {
+                          return <span key={page} className="px-2 text-gray-400">...</span>;
+                        }
+                        return null;
+                      }
+
+                      return (
+                        <button
+                          key={page}
+                          onClick={() => goToExclusionPage(page)}
+                          className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                            page === exclusionPageSafe
+                              ? 'bg-red-600 text-white'
+                              : 'border border-gray-300 hover:bg-gray-100'
+                          }`}
+                        >
+                          {page}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <button
+                    onClick={() => goToExclusionPage(exclusionPageSafe + 1)}
+                    disabled={exclusionPageSafe === exclusionTotalPages}
+                    className="flex items-center gap-1 px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent text-sm font-medium"
+                  >
+                    Next
+                    <ChevronRight className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         ) : (
           <div className="text-center py-8 text-gray-500">
