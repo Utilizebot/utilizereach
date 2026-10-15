@@ -566,7 +566,7 @@ async def start_campaign(request: CampaignStartRequest, background_tasks: Backgr
 
 
 @router.get("/status")
-async def get_campaign_status():
+def get_campaign_status():
     """
     Get current campaign status
 
@@ -582,14 +582,28 @@ async def get_campaign_status():
         new_leads = supabase.table('scraped_leads').select('id', count='exact').eq('status', 'new').limit(1).execute()
         contacted_leads = supabase.table('scraped_leads').select('id', count='exact').eq('status', 'contacted').limit(1).execute()
 
-        # Get unemailed count
-        unemailed = get_unemailed_leads(1000)  # Check up to 1000
+        # Unemailed count: one read-only COUNT with the same suppression rules
+        # as get_unemailed_leads (exclusions, unsubscribes, global suppression,
+        # already sent). It used to call get_unemailed_leads(1000), which
+        # MX-checked up to 3,000 leads (~70s) and auto-excluded failures on
+        # every Leads page load.
+        brand_id = tenancy.require_brand()
+        unemailed_rows = execute_sql(
+            "SELECT COUNT(*) AS n FROM scraped_leads l "
+            "WHERE l.brand_id = %s AND l.status = 'new' AND coalesce(l.email, '') <> '' "
+            "AND NOT EXISTS (SELECT 1 FROM email_exclusions x WHERE x.brand_id = l.brand_id AND lower(x.email) = lower(l.email)) "
+            "AND NOT EXISTS (SELECT 1 FROM email_unsubscribes u WHERE u.brand_id = l.brand_id AND lower(u.email) = lower(l.email)) "
+            "AND NOT EXISTS (SELECT 1 FROM global_suppression g WHERE lower(g.email) = lower(l.email)) "
+            "AND NOT EXISTS (SELECT 1 FROM sent_emails s WHERE s.brand_id = l.brand_id AND lower(s.recipient_email) = lower(l.email))",
+            [brand_id],
+        )
+        unemailed_count = unemailed_rows[0]['n'] if unemailed_rows else 0
 
         return {
             'total_leads': total_leads.count if total_leads.count else 0,
             'new_leads': new_leads.count if new_leads.count else 0,
             'contacted_leads': contacted_leads.count if contacted_leads.count else 0,
-            'unemailed_leads': len(unemailed)
+            'unemailed_leads': unemailed_count
         }
 
     except Exception as e:
