@@ -286,3 +286,31 @@
 }
 @keyframes login-draw { to { stroke-dashoffset: 0; } }
 @keyframes login-rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+/* ------------------------------------------------------------------ landing
+ * Public landing page (src/pages/Landing.tsx, src/components/landing/*).
+ * Motion is progressive and motion-safe only: scroll reveals use
+ * scroll-driven animations (animation-timeline: view()), so content is never
+ * left hidden waiting on JS; browsers without support just show everything.
+ */
+@keyframes lp-rise { from { opacity: 0; transform: translateY(26px); } }
+@keyframes lp-fade { from { opacity: 0; } }
+@keyframes lp-slide { from { opacity: 0; transform: translateX(-10px); } }
+@keyframes lp-bar { from { transform: scaleX(0); } }
+@keyframes lp-blink { 50% { opacity: 0.25; } }
+/* in-page anchors jump instead of gliding when motion is reduced */
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .lp-load { animation: lp-rise 0.9s cubic-bezier(0.22, 1, 0.36, 1) both; }
+  .lp-swap-fade { animation: lp-fade 0.5s ease-out both; }
+  .lp-swap-slide { animation: lp-slide 0.45s cubic-bezier(0.22, 1, 0.36, 1) both; }
+  /* a few beats, then still (WCAG 2.2.2: no endless blinking) */
+  .lp-blink { animation: lp-blink 1.6s ease-in-out 4; }
+  @supports (animation-timeline: view()) {
+    .lp-reveal { animation: lp-rise linear both; animation-timeline: view(); animation-range: entry 0px entry 260px; }
+    .lp-reveal-late { animation-range: entry 60px entry 320px; }
+    .lp-bar { animation: lp-bar linear both; animation-timeline: view(); animation-range: entry 40px entry 340px; }
+  }
+}

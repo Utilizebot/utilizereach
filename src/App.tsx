@@ -1,63 +1,77 @@
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import { LeadForm } from './components/Form/LeadForm';
-import { ExecutiveForm } from './components/Form/ExecutiveForm';
-import { ModularForm } from './components/Form/ModularForm';
-import { Dashboard } from './pages/Dashboard';
-import { Success } from './pages/Success';
+import { lazy, Suspense, type ComponentType } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate, Outlet } from 'react-router-dom';
+// Eager: the public front door and the sign-in page ship in the entry chunk.
+import Landing from './pages/Landing';
 import { Login } from './pages/Login';
-import { Scraper } from './pages/Scraper';
-import { LeadFunnel } from './pages/LeadFunnel';
-import { LeadsManagement } from './pages/LeadsManagement';
-import { Emails } from './pages/Emails';
-import { Campaigns } from './pages/Campaigns';
-import { Replies } from './pages/Replies';
-import { OutboundAnalytics } from './pages/OutboundAnalytics';
-import { WhatsWinning } from './pages/WhatsWinning';
-import { EmailAccounts } from './pages/EmailAccounts';
-import { AgentStream } from './pages/AgentStream';
-import { SocialMedia } from './pages/SocialMedia';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { DashboardLayout } from './components/DashboardLayout';
-import { SettingsLayout } from './pages/Settings/SettingsLayout';
-import { ProfileSettings } from './pages/Settings/ProfileSettings';
-import { UsersSettings } from './pages/Settings/UsersSettings';
-import { ApiKeysSettings } from './pages/Settings/ApiKeysSettings';
-import { SchedulerSettings } from './pages/Settings/SchedulerSettings';
-import { EmailAISettings } from './pages/Settings/EmailAISettings';
-import { BrandSettings } from './pages/Settings/BrandSettings';
-import { BrandsSettings } from './pages/Settings/BrandsSettings';
-import { SetupWizard } from './pages/SetupWizard';
 import { useConfigContext } from './context/ConfigContext';
-import { NexusDashboard } from './pages/NexusDashboard';
-import { NexusAgentHub } from './pages/NexusAgentHub';
-import { NexusStakeholders } from './pages/NexusStakeholders';
-import NexusCampaignBuilder from './pages/NexusCampaignBuilder';
-import NexusAuditLogs from './pages/NexusAuditLogs';
-import { NexusSettings } from './pages/NexusSettings';
+
+// Everything else is code-split, so a first visit to "/" does not download
+// the dashboard (recharts, Nexus pages, settings) it never uses.
+const named = <K extends string>(load: () => Promise<Record<K, ComponentType>>, name: K) =>
+  lazy(() => load().then((m) => ({ default: m[name] })));
+
+const LeadForm = named(() => import('./components/Form/LeadForm'), 'LeadForm');
+const ExecutiveForm = named(() => import('./components/Form/ExecutiveForm'), 'ExecutiveForm');
+const ModularForm = named(() => import('./components/Form/ModularForm'), 'ModularForm');
+const Dashboard = named(() => import('./pages/Dashboard'), 'Dashboard');
+const Success = named(() => import('./pages/Success'), 'Success');
+const Scraper = named(() => import('./pages/Scraper'), 'Scraper');
+const LeadFunnel = named(() => import('./pages/LeadFunnel'), 'LeadFunnel');
+const LeadsManagement = named(() => import('./pages/LeadsManagement'), 'LeadsManagement');
+const Emails = named(() => import('./pages/Emails'), 'Emails');
+const Campaigns = named(() => import('./pages/Campaigns'), 'Campaigns');
+const Replies = named(() => import('./pages/Replies'), 'Replies');
+const OutboundAnalytics = named(() => import('./pages/OutboundAnalytics'), 'OutboundAnalytics');
+const WhatsWinning = named(() => import('./pages/WhatsWinning'), 'WhatsWinning');
+const EmailAccounts = named(() => import('./pages/EmailAccounts'), 'EmailAccounts');
+const AgentStream = named(() => import('./pages/AgentStream'), 'AgentStream');
+const SocialMedia = named(() => import('./pages/SocialMedia'), 'SocialMedia');
+const SettingsLayout = named(() => import('./pages/Settings/SettingsLayout'), 'SettingsLayout');
+const ProfileSettings = named(() => import('./pages/Settings/ProfileSettings'), 'ProfileSettings');
+const UsersSettings = named(() => import('./pages/Settings/UsersSettings'), 'UsersSettings');
+const ApiKeysSettings = named(() => import('./pages/Settings/ApiKeysSettings'), 'ApiKeysSettings');
+const SchedulerSettings = named(() => import('./pages/Settings/SchedulerSettings'), 'SchedulerSettings');
+const EmailAISettings = named(() => import('./pages/Settings/EmailAISettings'), 'EmailAISettings');
+const BrandSettings = named(() => import('./pages/Settings/BrandSettings'), 'BrandSettings');
+const BrandsSettings = named(() => import('./pages/Settings/BrandsSettings'), 'BrandsSettings');
+const SetupWizard = named(() => import('./pages/SetupWizard'), 'SetupWizard');
+const NexusDashboard = named(() => import('./pages/NexusDashboard'), 'NexusDashboard');
+const NexusAgentHub = named(() => import('./pages/NexusAgentHub'), 'NexusAgentHub');
+const NexusStakeholders = named(() => import('./pages/NexusStakeholders'), 'NexusStakeholders');
+const NexusSettings = named(() => import('./pages/NexusSettings'), 'NexusSettings');
+const NexusCampaignBuilder = lazy(() => import('./pages/NexusCampaignBuilder'));
+const NexusAuditLogs = lazy(() => import('./pages/NexusAuditLogs'));
+
+function Spinner() {
+  return (
+    <div className="min-h-screen bg-slate-900 flex items-center justify-center">
+      <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-purple-500"></div>
+    </div>
+  );
+}
+
+/**
+ * Config gate for every route except the public landing page: wait for the
+ * host config, and show the Setup Wizard until setup is complete. "/" sits
+ * outside it so the landing paints immediately, with or without the backend.
+ */
+function ConfigGate() {
+  const { loading, isSetupComplete } = useConfigContext();
+  if (loading) return <Spinner />;
+  if (!isSetupComplete) return <SetupWizard />;
+  return <Outlet />;
+}
 
 function AppContent() {
-  const { loading, isSetupComplete } = useConfigContext();
-
-  // Show loading spinner while checking config
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-purple-500"></div>
-      </div>
-    );
-  }
-
-  // Show setup wizard if not configured
-  if (!isSetupComplete) {
-    return <SetupWizard />;
-  }
-
-  // Normal app routing
   return (
     <Router>
+      <Suspense fallback={<Spinner />}>
       <Routes>
-        {/* Config-driven lead capture form (branding set in the Setup Wizard) */}
-        <Route path="/" element={<ModularForm />} />
+        {/* Public landing page: static, outside the config gate, no /api needed */}
+        <Route path="/" element={<Landing />} />
+        <Route element={<ConfigGate />}>
         {/* Alternate form layouts */}
         <Route path="/form" element={<ExecutiveForm />} />
         <Route path="/form-simple" element={<ModularForm />} />
@@ -266,7 +280,9 @@ function AppContent() {
         <Route path="/nexus/campaigns" element={<ProtectedRoute><NexusCampaignBuilder /></ProtectedRoute>} />
         <Route path="/nexus/audit-logs" element={<ProtectedRoute><NexusAuditLogs /></ProtectedRoute>} />
         <Route path="/nexus/settings" element={<ProtectedRoute><NexusSettings /></ProtectedRoute>} />
+        </Route>
       </Routes>
+      </Suspense>
     </Router>
   );
 }
