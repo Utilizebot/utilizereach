@@ -197,9 +197,10 @@ async def get_all_accounts(current_user: dict = Depends(require_permission("acco
             all_time_sent = supabase.table('sent_emails')\
                 .select('id', count='exact')\
                 .eq('from_email', account.get('email', ''))\
+                .limit(1)\
                 .execute()
 
-            total_sent = len(all_time_sent.data) if all_time_sent.data else 0
+            total_sent = all_time_sent.count or 0
 
             # Get emails sent today
             today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -207,9 +208,10 @@ async def get_all_accounts(current_user: dict = Depends(require_permission("acco
                 .select('id', count='exact')\
                 .eq('from_email', account.get('email', ''))\
                 .gte('sent_at', today_start.isoformat())\
+                .limit(1)\
                 .execute()
 
-            sent_today = len(today_sent.data) if today_sent.data else 0
+            sent_today = today_sent.count or 0
 
             # Get emails sent this week
             week_start = datetime.utcnow() - timedelta(days=7)
@@ -217,9 +219,10 @@ async def get_all_accounts(current_user: dict = Depends(require_permission("acco
                 .select('id', count='exact')\
                 .eq('from_email', account.get('email', ''))\
                 .gte('sent_at', week_start.isoformat())\
+                .limit(1)\
                 .execute()
 
-            sent_this_week = len(week_sent.data) if week_sent.data else 0
+            sent_this_week = week_sent.count or 0
 
             # Calculate remaining quota
             daily_limit = account.get('daily_limit', 50)
@@ -291,14 +294,15 @@ async def get_accounts_summary(current_user: dict = Depends(require_permission("
         today_sent = supabase.table('sent_emails')\
             .select('id', count='exact')\
             .gte('sent_at', today_start.isoformat())\
+            .limit(1)\
             .execute()
 
-        total_sent_today = len(today_sent.data) if today_sent.data else 0
+        total_sent_today = today_sent.count or 0
         remaining_today = max(0, total_daily_limit - total_sent_today)
 
         # Get all time totals
-        all_emails = supabase.table('sent_emails').select('id', count='exact').execute()
-        total_all_time = len(all_emails.data) if all_emails.data else 0
+        all_emails = supabase.table('sent_emails').select('id', count='exact').limit(1).execute()
+        total_all_time = all_emails.count or 0
 
         return {
             "total_accounts": total_accounts,
@@ -581,11 +585,12 @@ async def get_account_details(account_id: str, current_user: dict = Depends(requ
                 .eq('email_account_id', account_id)\
                 .gte('sent_at', day_start.isoformat())\
                 .lt('sent_at', day_end.isoformat())\
+                .limit(1)\
                 .execute()
 
             daily_history.append({
                 "date": day_start.strftime('%Y-%m-%d'),
-                "sent": len(day_emails.data) if day_emails.data else 0
+                "sent": day_emails.count or 0
             })
 
         daily_history.reverse()  # Show oldest to newest
