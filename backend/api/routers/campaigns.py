@@ -576,11 +576,11 @@ async def get_campaign_status():
         supabase = get_supabase()
 
         # Get total leads
-        total_leads = supabase.table('scraped_leads').select('id', count='exact').execute()
+        total_leads = supabase.table('scraped_leads').select('id', count='exact').limit(1).execute()
 
         # Get leads by status
-        new_leads = supabase.table('scraped_leads').select('id', count='exact').eq('status', 'new').execute()
-        contacted_leads = supabase.table('scraped_leads').select('id', count='exact').eq('status', 'contacted').execute()
+        new_leads = supabase.table('scraped_leads').select('id', count='exact').eq('status', 'new').limit(1).execute()
+        contacted_leads = supabase.table('scraped_leads').select('id', count='exact').eq('status', 'contacted').limit(1).execute()
 
         # Get unemailed count
         unemailed = get_unemailed_leads(1000)  # Check up to 1000

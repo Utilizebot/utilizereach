@@ -335,7 +335,8 @@ async def get_scheduler_status(current_user: dict = Depends(require_permission("
         leads_result = supabase.table('scraped_leads')\
             .select('id', count='exact')\
             .eq('status', 'new')\
-            .execute()
+            .limit(1)\
+            .execute()  # only the COUNT is used; limit(1) avoids fetching every row
 
         pending_leads = leads_result.count if hasattr(leads_result, 'count') else 0
 
