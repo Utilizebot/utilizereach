@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { CheckCircle, Mail, Phone } from 'lucide-react';
 import { getConfig } from '../lib/config';
@@ -98,9 +99,10 @@ export function Success() {
           )}
 
           <div className="mt-8">
-            <a href="/" className="text-blue-600 hover:text-blue-700 text-sm font-medium">
+            {/* "/" is now the UtilizeReach landing page; the brand form lives at /form-simple */}
+            <Link to="/form-simple" className="text-blue-600 hover:text-blue-700 text-sm font-medium">
               ← Back to {companyName}
-            </a>
+            </Link>
           </div>
         </div>
       </motion.div>

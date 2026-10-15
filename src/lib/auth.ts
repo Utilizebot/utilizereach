@@ -154,6 +154,10 @@ function requestUrl(input: RequestInfo | URL): string {
 function goToLogin(): void {
   if (redirectingToLogin) return;
   if (window.location.pathname === '/login') return;
+  // Never hijack the public landing page: its background config calls may
+  // carry a stale token, but the visitor came to read, not to sign in.
+  // /dashboard's ProtectedRoute deals with the stale session when it matters.
+  if (window.location.pathname === '/') return;
   redirectingToLogin = true;
   clearStoredToken();
   window.location.assign('/login');
