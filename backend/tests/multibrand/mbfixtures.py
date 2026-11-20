@@ -223,6 +223,15 @@ def _seed_acme(cur, acme: str, users: Dict[str, str]) -> None:
     _upsert(cur, "scraping_logs", {
         "id": A["scrape_log"], "job_id": A["job"], "log_level": "info", "message": f"{T} log",
         "brand_id": acme})
+    # Google Analytics connection. No refresh token, so the dashboard GA
+    # endpoints answer "reconnect_required" without calling Google; the secrets
+    # check plants a fake token on it temporarily.
+    _upsert(cur, "brand_integrations", {
+        "id": A["ga_integration"], "provider": "google_analytics",
+        "config": {"property_id": "123456789", "property_name": f"{T} GA property",
+                   "highlight_source": "acme-iso", "show_on_dashboard": True},
+        "refresh_token": None, "account_email": f"ga@{D}", "status": "connected",
+        "connected_by": users["acme_admin"], "brand_id": acme}, natural=("brand_id", "provider"))
     # staging_legacy_contacts has a serial key: replace the batch wholesale
     cur.execute("DELETE FROM staging_legacy_contacts WHERE brand_id = %s AND raw_data->>'_batch_id' = %s",
                 [acme, A["batch"]])

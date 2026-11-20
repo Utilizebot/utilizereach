@@ -26,7 +26,8 @@ import {
   Clock,
   Sparkles,
   Building2,
-  Layers
+  Layers,
+  Plug
 } from 'lucide-react';
 import { useAuth } from '../../hooks/useAuth';
 
@@ -66,6 +67,12 @@ const navItems: NavItem[] = [
     path: '/settings/email-ai',
     label: 'AI Email Settings',
     icon: <Sparkles size={20} />,
+    permission: 'settings.manage',
+  },
+  {
+    path: '/settings/integrations',
+    label: 'Integrations',
+    icon: <Plug size={20} />,
     permission: 'settings.manage',
   },
   {

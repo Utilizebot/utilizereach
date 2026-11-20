@@ -24,6 +24,7 @@ import { UsersSettings } from './pages/Settings/UsersSettings';
 import { ApiKeysSettings } from './pages/Settings/ApiKeysSettings';
 import { SchedulerSettings } from './pages/Settings/SchedulerSettings';
 import { EmailAISettings } from './pages/Settings/EmailAISettings';
+import { IntegrationsSettings } from './pages/Settings/IntegrationsSettings';
 import { BrandSettings } from './pages/Settings/BrandSettings';
 import { BrandsSettings } from './pages/Settings/BrandsSettings';
 import { SetupWizard } from './pages/SetupWizard';
@@ -222,6 +223,9 @@ function AppContent() {
 
           {/* AI Email Settings */}
           <Route path="email-ai" element={<ProtectedRoute requiredPermission="settings.manage"><EmailAISettings /></ProtectedRoute>} />
+
+          {/* Integrations (per brand): Google Analytics, ... */}
+          <Route path="integrations" element={<ProtectedRoute requiredPermission="settings.manage"><IntegrationsSettings /></ProtectedRoute>} />
 
           {/* API Keys Management - Phase 2 */}
           <Route path="api-keys" element={<ProtectedRoute requiredPermission="apikeys.manage"><ApiKeysSettings /></ProtectedRoute>} />

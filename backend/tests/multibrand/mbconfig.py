@@ -112,6 +112,9 @@ FAKE_TOKENS = {
     "xw": {"refresh_token": "mbiso-FAKE-refresh-xw-a3f01505a7", "access_token": "mbiso-FAKE-access-xw-e0b001c3"},
 }
 FAKE_AI_KEY = "sk-mbiso-fake-ai-key-acme-7Qz3Xw9Lp2Rk"
+# Planted on acme's Google Analytics connection (brand_integrations) during
+# the secrets check; GET .../google-analytics/status must never return it.
+FAKE_GA_REFRESH = "mbiso-FAKE-ga-refresh-acme-2f8d61c0b4"
 
 # Lead "names" used as search terms. They are deliberately NOT markers, so
 # scrubbing the query value cannot hide a real leak.
@@ -192,6 +195,7 @@ def ids_for(side: str) -> dict:
             "form_response": fid("acme.form_response1"),
             "tracking_event": fid("acme.tracking_event1"),
             "scrape_log": fid("acme.scrape_log1"),
+            "ga_integration": fid("acme.ga_integration"),
         })
     else:
         d.update({
