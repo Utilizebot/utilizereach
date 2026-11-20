@@ -49,7 +49,8 @@ scheduler_settings, scheduler_run_history, form_sessions, form_responses,
 form_steps, tracking_events, api_keys, social_media_accounts,
 social_media_posts, stakeholders, shareholder_profiles, partner_profiles,
 govt_agency_profiles, staging_legacy_contacts, stakeholder_audit_logs,
-agent_execution_approvals, (view) analytics_overview.
+agent_execution_approvals, brand_integrations (per-brand Google Analytics
+connection), (view) analytics_overview.
 
 Global (NOT tenant) tables: `brands`, `brand_members`, `sales_reps` (login
 identity), `global_suppression`, `tenancy_migrations`.

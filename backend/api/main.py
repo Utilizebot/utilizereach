@@ -15,6 +15,14 @@ from typing import Dict, Set
 # Add parent directory to import path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Gmail and Google Analytics share one Google OAuth client. The Gmail connect
+# asks for include_granted_scopes, so Google answers with every scope the
+# account ever granted to that client (analytics.readonly too, once the
+# account connected Google Analytics), and oauthlib would refuse that token
+# ("Scope has changed"). Set before any request is served.
+from integrations.google_analytics import allow_google_scope_union
+allow_google_scope_union()
+
 from api.routers import scraper, email_tracking, leads, emails, email_accounts, campaigns, exclusions, scheduler, setup, email_ai_settings, chat, test_email, auth, tracking, analytics, api_keys
 from api.routers import nexus_migration, nexus_agents, nexus_stakeholders
 from api.routers import segments
@@ -27,6 +35,7 @@ from api.routers import stream
 from api.routers import social_media
 from api.routers import social_accounts
 from api.routers import brands
+from api.routers import integrations_google_analytics
 from api.dependencies import get_current_user, get_current_user_from_query
 from typing import Optional
 from utils.redis_client import subscribe_to_progress
@@ -176,7 +185,9 @@ async def initialize_shared_config():
 #   email_tracking (/track pixel/click/unsubscribe tokens), tracking (public
 #   lead form), unsubscribe, setup (bootstrap wizard), auth (login/register/
 #   status public, the rest per-endpoint), chat (website widget), brands
-#   (public-config public, the rest per-endpoint).
+#   (public-config public, the rest per-endpoint), and the Google OAuth
+#   callbacks (email_accounts / integrations_google_analytics public_router:
+#   each verifies its own signed, purpose-bound state).
 # PROTECTED: everything else requires an active account and is bound to the
 #   caller's active brand. See docs/MULTIBRAND.md.
 # ---------------------------------------------------------------------------
@@ -212,6 +223,8 @@ app.include_router(insights.router, dependencies=_AUTH)
 app.include_router(stream.router, dependencies=_AUTH)
 app.include_router(social_media.router, dependencies=_AUTH)
 app.include_router(social_accounts.router, dependencies=_AUTH)
+app.include_router(integrations_google_analytics.public_router)  # Google OAuth callback only (verifies its signed state)
+app.include_router(integrations_google_analytics.router, dependencies=_AUTH)  # callback is NOT on this router
 
 # WebSocket connection manager
 class ConnectionManager:

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Google Analytics 4 integration, per brand.** Brand admins connect a Google account (read-only `analytics.readonly`) under **Settings → Integrations**, pick a GA4 property and choose the outreach `utm_source` to highlight (defaults to the brand's sender `utm_source`). The Dashboard gets a **Website live** card (active users and per-minute users for the last 30 minutes, top pages, countries and devices) and a **From your email campaigns** panel (sessions, users and key events by `utm_campaign` and by sender persona `utm_term`, daily trend, landing pages). Uses the existing Google OAuth client; the server admin enables the Google Analytics Data and Admin APIs and adds one redirect URI. See [docs/GOOGLE_ANALYTICS.md](docs/GOOGLE_ANALYTICS.md).
+- API: `/api/integrations/google-analytics/` with the endpoints `status`, `auth`, `callback`, `connect`, `properties`, `settings`, `realtime`, `summary`, and `DELETE` to disconnect.
+- New tenant table `brand_integrations` (one row per brand and provider), created by the startup migration with forced row-level security like every other tenant table, and covered by the cross-brand leak suite.
+
+### Security
+
+- Google Analytics refresh tokens are stored per brand and never returned by the API or logged. Errors are rewritten so they never echo Google's raw text. The OAuth `state` is signed, expires after 15 minutes and is purpose-bound, so Gmail and GA connect links cannot be replayed on each other's callback. Disconnecting skips the Google-side revoke when the same Google account is also used for sending, because a revoke would cut off the mailbox too.
+- The Google Analytics callback stores nothing: it hands the browser an encrypted, 10-minute connect ticket (URL fragment) that only the admin who started the flow can redeem, in the same brand, with `POST /connect`. A forwarded consent link cannot attach someone else's Google account to a brand.
+- With **Show on Dashboard** off, `/realtime` and `/summary` return no data to users without `settings.manage` (not only hidden in the UI).
+- Google calls run on their own small thread limiter with bounded waits, so a slow Google cannot starve the API's shared worker threads.
+
+### Changed
+
+- The backend sets `OAUTHLIB_RELAX_TOKEN_SCOPE=1` at startup (unless the operator set it). Gmail and Google Analytics share one Google OAuth client, and the Gmail connect asks Google for every scope the account already granted to it; without this, a mailbox connect would fail for a Google account that also connected Google Analytics. Side effect: a Gmail connect where the user unticked a Gmail permission is no longer refused at connect time; it fails later, when the missing permission is used.
+
 ## [2.0.0] - 2026-10-05
 
 Multi-brand release: one deployment can now host several fully isolated

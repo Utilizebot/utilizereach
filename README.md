@@ -89,6 +89,11 @@ bounces in a real-time dashboard.
   results.
 - **Excel export** — download the filtered sent-emails view as an
   Excel-ready CSV.
+- **Google Analytics 4 (per brand)** — each brand admin connects the brand's
+  GA4 property from **Settings → Integrations** (read-only). The Dashboard then
+  shows live visitors and the site traffic that came from your outreach emails,
+  by campaign and by sender persona. See
+  [docs/GOOGLE_ANALYTICS.md](./docs/GOOGLE_ANALYTICS.md).
 
 ## Stack
 

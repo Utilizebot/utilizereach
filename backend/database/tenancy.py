@@ -51,6 +51,7 @@ TENANT_TABLES = frozenset({
     "api_keys", "social_media_accounts", "social_media_posts",
     "stakeholders", "shareholder_profiles", "partner_profiles", "govt_agency_profiles",
     "staging_legacy_contacts", "stakeholder_audit_logs", "agent_execution_approvals",
+    "brand_integrations",
     # analytics view over form_sessions/form_responses (security_invoker)
     "analytics_overview",
 })

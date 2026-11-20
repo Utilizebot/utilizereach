@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { useAnalytics } from '../hooks/useAnalytics';
 import { LeadDetailModal } from '../components/LeadDetailModal';
+import { WebsiteLiveCard } from '../components/analytics/WebsiteLiveCard';
 import { useConfig } from '../context/ConfigContext';
 import {
   BarChart,
@@ -165,6 +166,9 @@ export function Dashboard() {
           delay={0.2}
         />
       </div>
+
+      {/* Website live - Google Analytics (Settings > Integrations); renders nothing when not set up */}
+      <WebsiteLiveCard />
 
       {/* SECTION 1: LEAD ANALYTICS */}
       <div>

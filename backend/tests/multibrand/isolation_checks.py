@@ -41,6 +41,7 @@ SWEEP_SKIP = [
     (re.compile(r"^/track/"), "public tracking pixel/click/unsubscribe - records events"),
     (re.compile(r"^/api/unsubscribe"), "public opt-out endpoint - records unsubscribes"),
     (re.compile(r"/google/callback$"), "OAuth callback - exchanges codes with Google"),
+    (re.compile(r"^/api/integrations/google-analytics/callback$"), "GA OAuth callback - exchanges codes with Google"),
 ]
 STREAM_RE = re.compile(r"(stream|/events$)")
 
@@ -49,6 +50,7 @@ PUBLIC_ALLOW = [re.compile(p) for p in (
     r"^/health$", r"^/api/health$", r"^/api/auth/login$", r"^/api/auth/register$", r"^/api/auth/status$",
     r"^/api/brands/public-config$", r"^/track/", r"^/api/unsubscribe$", r"^/api/tracking/", r"^/api/chat$",
     r"^/api/setup/status$", r"^/api/email-accounts/google/callback$",
+    r"^/api/integrations/google-analytics/callback$",
     # GET only: the login / landing pages load the Host's branding before sign-in
     # (brand-correctness is checked in `public`). POST /api/setup/save and
     # /test-connection stay probed.
@@ -862,27 +864,44 @@ def check_rbac(ctx: Ctx) -> None:
          lambda: [Snap("brand_members", "brand_id = %s", [B1], key="brand_id::text || ':' || sales_rep_id::text")]),
         ("edit brand", "PATCH", "/api/brands/current", {"display_name": "pwned"},
          lambda: [Snap("brands", "id = %s", [B1])]),
+        # GA writes are probed as acme_viewer below, never against brand 1's real connection
+        ("start Google Analytics connect", "GET", "/api/integrations/google-analytics/auth", None, None),
         ("list members (users.view)", "GET", "/api/brands/current/members", None, None),
         ("list all brands (platform)", "GET", "/api/brands", None, None),
         ("create brand (platform)", "POST", "/api/brands", {"slug": cfg.PROBE_BRAND_SLUG, "display_name": P},
          lambda: [Snap("brands", "slug = %s", [cfg.PROBE_BRAND_SLUG])]),
     ]
+    # Google Analytics writes run as acme_viewer against acme's fixture
+    # connection, which has NO refresh token: even if the permission check
+    # regressed, nothing could reach Google. (A DELETE that got through on
+    # brand 1's real connection would revoke its live grant at Google, which
+    # restoring the row cannot undo.)
+    acme_ga = lambda: [Snap("brand_integrations", "brand_id = %s", [ctx.acme_id])]  # noqa: E731
+    acme_probes = [
+        ("Google Analytics settings", "PUT", "/api/integrations/google-analytics/settings",
+         {"highlight_source": "pwned", "show_on_dashboard": False}, acme_ga),
+        ("disconnect Google Analytics", "DELETE", "/api/integrations/google-analytics", None, acme_ga),
+        ("finish Google Analytics connect", "POST", "/api/integrations/google-analytics/connect",
+         {"ticket": "mbiso-not-a-ticket"}, acme_ga),
+        ("list Google Analytics properties", "GET", "/api/integrations/google-analytics/properties", None, None),
+    ]
     rep = ctx.report
-    for name, method, path, body, snaps in probes:
-        w = Watch(snaps() if snaps else [])
-        with w:
-            r = v.call(method, path, json_body=body)
-        what = f"{method} {path} [xw_viewer: {name}]"
-        if w.diffs:
-            rep.add(sec, "FAIL", what, user="xw_viewer", status=r.status, diffs=w.diffs,
-                    detail="viewer changed data (rows restored)")
-        elif r.status == 403:
-            rep.add(sec, "PASS", what, user="xw_viewer", status=r.status)
-        elif r.ok:
-            rep.add(sec, "FAIL", what, user="xw_viewer", status=r.status, detail=f"expected 403: {r.short()}")
-        else:
-            rep.add(sec, _status_verdict(r, {403}), what, user="xw_viewer", status=r.status,
-                    detail=f"expected 403: {r.short()}")
+    for user, api, plist in (("xw_viewer", v, probes), ("acme_viewer", ctx.s["acme_viewer"], acme_probes)):
+        for name, method, path, body, snaps in plist:
+            w = Watch(snaps() if snaps else [])
+            with w:
+                r = api.call(method, path, json_body=body)
+            what = f"{method} {path} [{user}: {name}]"
+            if w.diffs:
+                rep.add(sec, "FAIL", what, user=user, status=r.status, diffs=w.diffs,
+                        detail="viewer changed data (rows restored)")
+            elif r.status == 403:
+                rep.add(sec, "PASS", what, user=user, status=r.status)
+            elif r.ok:
+                rep.add(sec, "FAIL", what, user=user, status=r.status, detail=f"expected 403: {r.short()}")
+            else:
+                rep.add(sec, _status_verdict(r, {403}), what, user=user, status=r.status,
+                        detail=f"expected 403: {r.short()}")
     # brand admins that are not platform admins
     a = ctx.s["xw_admin"]
     for name, method, path, body, snaps in (
@@ -1182,6 +1201,47 @@ def check_secrets(ctx: Ctx) -> None:
                 key_probe(user, "xw", b1_key, [cfg.FAKE_AI_KEY], "brand-1 stored")
         else:
             rep.add(sec, "INFO", "brand 1 has no stored ai_api_key - masking checked in acme only")
+    # ---- Google Analytics refresh token (brand_integrations)
+    ga_path = "/api/integrations/google-analytics/status"
+    ga_tokens: Dict[str, tuple] = {"planted acme GA refresh_token": ("acme", cfg.FAKE_GA_REFRESH)}
+    for i, row in enumerate(q("SELECT refresh_token FROM brand_integrations WHERE brand_id = %s "
+                              "AND refresh_token IS NOT NULL", [B1])):
+        v = row.get("refresh_token")
+        if v and len(str(v)) >= 12:
+            ga_tokens[f"real brand-1 GA refresh_token #{i + 1}"] = ("xw", str(v))
+
+    def ga_probe(user: str, side: str) -> None:
+        api = ctx.s[user]
+        role = _role_of(user)
+        r = api.call("GET", ga_path)
+        what = f"GET {ga_path} [{user} ({role})]: no GA refresh token value"
+        if not r.ok:
+            rep.add(sec, "ERROR", what, user=user, status=r.status,
+                    detail="could not verify (non-2xx; body not shown, it may hold secrets)")
+            return
+        low = r.text.lower()
+        fields = _token_fields(r.json())
+        own_vals = sorted(lbl for lbl, (s, v) in ga_tokens.items() if s == side and v.lower() in low)
+        foreign_vals = sorted(lbl for lbl, (s, v) in ga_tokens.items() if s != side and v.lower() in low)
+        if foreign_vals:
+            rep.add(sec, "LEAK", what, user=user, status=r.status,
+                    detail=f"other brand's GA token value(s) in the response: {foreign_vals}")
+        elif fields or own_vals:
+            rep.add(sec, "FAIL", what, user=user, status=r.status,
+                    detail=f"token fields {fields[:6]} / values {own_vals} returned (values not shown)")
+        elif side == "acme" and not (isinstance(r.json(), dict) and r.json().get("connected") is True):
+            rep.add(sec, "ERROR", what, user=user, status=r.status,
+                    detail="acme's GA connection with the planted token is not reported connected - check is vacuous")
+        else:
+            rep.add(sec, "PASS", what, user=user, status=r.status)
+
+    with planted("brand_integrations", "id", A["ga_integration"], {"refresh_token": cfg.FAKE_GA_REFRESH}) as ok:
+        if not ok:
+            rep.add(sec, "ERROR", "acme brand_integrations fixture row missing - could not plant a GA token")
+        for user in acme_users:
+            ga_probe(user, "acme")
+        for user in xw_users:
+            ga_probe(user, "xw")
     _fail_if(rep, sec)
 
 

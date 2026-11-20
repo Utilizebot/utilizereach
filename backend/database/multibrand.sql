@@ -102,6 +102,29 @@ CREATE TABLE IF NOT EXISTS social_media_posts (
     updated_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Per-brand third-party integrations: one row per (brand, provider), e.g. the
+-- brand's Google Analytics 4 connection (api/routers/
+-- integrations_google_analytics.py). `config` holds the non-secret settings;
+-- `refresh_token` is an OAuth secret and is NEVER returned by the API.
+-- Born brand-scoped (brand_id NOT NULL + the app.brand_id default); section 2
+-- adds the brands FK and index, section 7 the RLS policy - it is listed in
+-- both tenant_tables arrays below and in database/tenancy.py TENANT_TABLES.
+CREATE TABLE IF NOT EXISTS brand_integrations (
+    id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    brand_id       UUID NOT NULL DEFAULT NULLIF(current_setting('app.brand_id', true), '')::uuid,
+    provider       TEXT NOT NULL CONSTRAINT brand_integrations_provider_check
+                       CHECK (provider IN ('google_analytics')),
+    config         JSONB NOT NULL DEFAULT '{}'::jsonb,
+    refresh_token  TEXT,
+    account_email  TEXT,
+    status         TEXT NOT NULL DEFAULT 'connected',
+    last_error     TEXT,
+    connected_by   UUID REFERENCES sales_reps(id) ON DELETE SET NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_brand_integrations_brand_provider UNIQUE (brand_id, provider)
+);
+
 -- ----------------------------------------------------------------------------
 -- 2. brand_id on every tenant table
 --    First run: add column, backfill to brand 1, then default + NOT NULL.
@@ -121,7 +144,8 @@ DECLARE
         'form_sessions', 'form_responses', 'form_steps', 'tracking_events',
         'api_keys', 'social_media_accounts', 'social_media_posts',
         'stakeholders', 'shareholder_profiles', 'partner_profiles', 'govt_agency_profiles',
-        'staging_legacy_contacts', 'stakeholder_audit_logs', 'agent_execution_approvals'
+        'staging_legacy_contacts', 'stakeholder_audit_logs', 'agent_execution_approvals',
+        'brand_integrations'
     ];
 BEGIN
     FOREACH t IN ARRAY tenant_tables LOOP
@@ -362,7 +386,8 @@ DECLARE
         'form_sessions', 'form_responses', 'form_steps', 'tracking_events',
         'api_keys', 'social_media_accounts', 'social_media_posts',
         'stakeholders', 'shareholder_profiles', 'partner_profiles', 'govt_agency_profiles',
-        'staging_legacy_contacts', 'stakeholder_audit_logs', 'agent_execution_approvals'
+        'staging_legacy_contacts', 'stakeholder_audit_logs', 'agent_execution_approvals',
+        'brand_integrations'
     ];
 BEGIN
     FOREACH t IN ARRAY tenant_tables LOOP
