@@ -5,7 +5,8 @@
  * - Connected + property chosen + "show on dashboard": active users in the
  *   last 30 minutes (GA's realtime window), a per-minute chart, top pages
  *   (by page title) / countries / devices, and the "From your email
- *   campaigns" panel.
+ *   campaigns" panel, plus a compact last-28-days row (visitors, visits,
+ *   page views, top countries) linking to /website-analytics.
  * - /realtime is polled every 30 s, /summary every 5 min; both pause while
  *   the tab is hidden and are aborted on unmount.
  * - Not connected: brand admins (settings.manage) get a slim dismissible
@@ -51,6 +52,7 @@ import {
   type GaSummaryDays,
 } from '../../lib/googleAnalytics';
 import { EmailCampaignsPanel } from './EmailCampaignsPanel';
+import { WebsiteSummaryRow } from './WebsiteSummaryRow';
 import { fmtNum, sharePct } from './gaFormat';
 import { GaErrorState, RankedList, SkeletonBlock, StaleWarning, UpdatedAgo, WidgetCard } from './gaWidgets';
 
@@ -407,6 +409,9 @@ function LiveAnalytics({
           </button>
         </div>
       </div>
+
+      {/* Last 28 days at a glance + link to the full page (useful when nobody is on the site right now) */}
+      <WebsiteSummaryRow />
 
       {/* Realtime */}
       {rtLoading && !realtime ? (

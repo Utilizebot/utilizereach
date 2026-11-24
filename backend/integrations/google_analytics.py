@@ -17,6 +17,8 @@ connection (the brand_integrations row) and calls into this module:
     fetch_realtime(session, property_id)   GA Data API runRealtimeReport (5 in parallel)
     fetch_summary(session, property_id, days, highlight_source)
                                            GA Data API batchRunReports (batches in parallel)
+    fetch_report(session, property_id, days, highlight_source)
+                                           the Website analytics page (16 reports, 4 batches)
     GAError(code, message)                 normalised, user-safe errors
     CACHE / cached()                       small in-process TTL cache keyed
                                            by (brand_id, kind, property, ...)
@@ -947,6 +949,333 @@ def fetch_summary(session: Any, property_id: str, days: int, highlight_source: O
             reports[name] = got[j] if j < len(got) and isinstance(got[j], dict) else {}
     today = property_today(report_time_zone(reports))
     return parse_summary(days, highlight_source, reports, today=today)
+
+
+# ---------------------------------------------------------------------------
+# Data API: the full website report (the Website analytics page)
+# ---------------------------------------------------------------------------
+
+REPORT_DAYS = (7, 28, 90)
+REPORT_TTL = 300               # seconds, like the summary
+
+_REPORT_TOTAL_METRICS = ("activeUsers", "newUsers", "sessions", "screenPageViews", "engagementRate",
+                         "userEngagementDuration", "eventCount", "keyEvents")
+
+
+def report_date_ranges(days: int) -> List[Dict[str, str]]:
+    """[current, previous]: the last `days` complete days (ending yesterday,
+    like GA's own "Last N days") and the `days` days before them (property
+    time zone), named so a two-range report's rows can be told apart.
+    Today is left out so both periods are whole days and the % change is
+    fair; the LIVE strip covers today."""
+    if days not in REPORT_DAYS:
+        raise ValueError(f"days must be one of {REPORT_DAYS}")
+    return [
+        {"startDate": f"{days}daysAgo", "endDate": "yesterday", "name": "current"},
+        {"startDate": f"{2 * days}daysAgo", "endDate": f"{days + 1}daysAgo", "name": "previous"},
+    ]
+
+
+def report_period(days: int, today: Optional[date] = None) -> Dict[str, Dict[str, str]]:
+    """The calendar dates the report covers: {"range": {start, end},
+    "previous_range": {start, end}} (ISO dates), both ending before
+    `today` (see report_date_ranges). `today` is the property's date
+    (property_today); UTC's date when unknown."""
+    end = (today or datetime.now(timezone.utc).date()) - timedelta(days=1)
+    start = end - timedelta(days=days - 1)
+    prev_end = start - timedelta(days=1)
+    prev_start = prev_end - timedelta(days=days - 1)
+    return {"range": {"start": start.isoformat(), "end": end.isoformat()},
+            "previous_range": {"start": prev_start.isoformat(), "end": prev_end.isoformat()}}
+
+
+def report_requests(days: int, highlight_source: Optional[str]) -> List[Tuple[str, dict]]:
+    """(name, RunReportRequest) pairs for the website report: 13 site-wide
+    reports, plus 3 for the outreach source when one is set (-> 4 batches)."""
+    cur = [report_date_ranges(days)[0]]
+
+    def m(*names: str) -> List[Dict[str, str]]:
+        return [{"name": n} for n in names]
+
+    def d(*names: str) -> List[Dict[str, str]]:
+        return [{"name": n} for n in names]
+
+    def desc(metric: str) -> List[Dict[str, Any]]:
+        return [{"metric": {"metricName": metric}, "desc": True}]
+
+    out: List[Tuple[str, dict]] = [
+        ("totals", {"dateRanges": report_date_ranges(days), "metrics": m(*_REPORT_TOTAL_METRICS)}),
+        ("daily", {"dateRanges": cur, "dimensions": d("date"),
+                   "metrics": m("activeUsers", "sessions", "screenPageViews"),
+                   "orderBys": [{"dimension": {"dimensionName": "date"}, "desc": False}], "limit": 400}),
+        ("countries", {"dateRanges": cur, "dimensions": d("country"), "metrics": m("activeUsers", "sessions"),
+                       "orderBys": desc("activeUsers"), "limit": 15}),
+        ("cities", {"dateRanges": cur, "dimensions": d("city", "country"), "metrics": m("activeUsers"),
+                    "orderBys": desc("activeUsers"), "limit": 10}),
+        ("channels", {"dateRanges": cur, "dimensions": d("sessionDefaultChannelGroup"),
+                      "metrics": m("sessions", "activeUsers"), "orderBys": desc("sessions"), "limit": 20}),
+        ("sources", {"dateRanges": cur, "dimensions": d("sessionSource", "sessionMedium"),
+                     "metrics": m("sessions", "activeUsers"), "orderBys": desc("sessions"), "limit": 10}),
+        # a path can have several titles: ask for more rows, merged per path in parse_report
+        ("pages", {"dateRanges": cur, "dimensions": d("pagePath", "pageTitle"),
+                   "metrics": m("screenPageViews", "activeUsers", "userEngagementDuration"),
+                   "orderBys": desc("screenPageViews"), "limit": 25}),
+        ("landing_pages", {"dateRanges": cur, "dimensions": d("landingPage"), "metrics": m("sessions"),
+                           "orderBys": desc("sessions"), "limit": 10}),
+        ("devices", {"dateRanges": cur, "dimensions": d("deviceCategory"), "metrics": m("activeUsers"),
+                     "orderBys": desc("activeUsers"), "limit": 10}),
+        ("browsers", {"dateRanges": cur, "dimensions": d("browser"), "metrics": m("activeUsers"),
+                      "orderBys": desc("activeUsers"), "limit": 6}),
+        ("os", {"dateRanges": cur, "dimensions": d("operatingSystem"), "metrics": m("activeUsers"),
+                "orderBys": desc("activeUsers"), "limit": 6}),
+        ("new_vs_returning", {"dateRanges": cur, "dimensions": d("newVsReturning"), "metrics": m("activeUsers"),
+                              "limit": 10}),
+        ("events", {"dateRanges": cur, "dimensions": d("eventName"), "metrics": m("eventCount"),
+                    "orderBys": desc("eventCount"), "limit": 15}),
+    ]
+    src = (highlight_source or "").strip()
+    if src:
+        flt = source_filter(src)
+        out += [
+            ("email_totals", {"dateRanges": cur, "metrics": m("sessions", "activeUsers", "keyEvents"),
+                              "dimensionFilter": flt}),
+            ("email_by_campaign", {"dateRanges": cur, "dimensions": d("sessionCampaignName"),
+                                   "metrics": m("sessions"), "dimensionFilter": flt,
+                                   "orderBys": desc("sessions"), "limit": 20}),
+            ("email_by_sender", {"dateRanges": cur, "dimensions": d("sessionManualTerm"),
+                                 "metrics": m("sessions"), "dimensionFilter": flt,
+                                 "orderBys": desc("sessions"), "limit": 20}),
+        ]
+    return out
+
+
+def empty_report_totals() -> Dict[str, Any]:
+    return {"users": 0, "new_users": 0, "sessions": 0, "page_views": 0, "engagement_rate": 0.0,
+            "avg_engagement_seconds": 0.0, "events": 0, "key_events": 0}
+
+
+def empty_email_ga() -> Dict[str, Any]:
+    return {"sessions": 0, "users": 0, "key_events": 0, "by_campaign": [], "by_sender": []}
+
+
+def _days_between(start: str, end: str) -> List[str]:
+    cur, last = date.fromisoformat(start), date.fromisoformat(end)
+    out = []
+    while cur <= last:
+        out.append(cur.isoformat())
+        cur += timedelta(days=1)
+    return out
+
+
+def empty_report(days: int, highlight_source: Optional[str], today: Optional[date] = None) -> Dict[str, Any]:
+    """Every GA section of the report, empty (zero-filled daily series)."""
+    period = report_period(days, today)
+    rng = period["range"]
+    return {
+        "days": days,
+        "range": dict(rng),
+        "previous_range": dict(period["previous_range"]),
+        "time_zone": None,
+        "highlight_source": (highlight_source or "").strip() or None,
+        "totals": empty_report_totals(),
+        "previous": empty_report_totals(),
+        "daily": [{"date": dt, "users": 0, "sessions": 0, "page_views": 0}
+                  for dt in _days_between(rng["start"], rng["end"])],
+        "countries": [], "cities": [], "channels": [], "sources": [], "pages": [], "landing_pages": [],
+        "devices": [], "browsers": [], "os": [],
+        "new_vs_returning": [{"type": "new", "users": 0}, {"type": "returning", "users": 0}],
+        "events": [],
+        "email_ga": empty_email_ga(),
+        "fetched_at": _now_iso(),
+    }
+
+
+def _totals_from_values(vals: Sequence[float]) -> Dict[str, Any]:
+    def v(i: int) -> float:
+        return vals[i] if i < len(vals) else 0.0
+
+    users = to_int(v(0))
+    return {
+        "users": users,
+        "new_users": to_int(v(1)),
+        "sessions": to_int(v(2)),
+        "page_views": to_int(v(3)),
+        "engagement_rate": round(v(4), 4),
+        "avg_engagement_seconds": round(v(5) / users, 1) if users else 0.0,
+        "events": to_int(v(6)),
+        "key_events": to_int(v(7)),
+    }
+
+
+def parse_report_totals(report: Any) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """(current, previous) from the two-date-range totals report. GA adds a
+    dateRange dimension (our range names, or date_range_0/1) and leaves out
+    a range that has no data."""
+    n = len(_REPORT_TOTAL_METRICS)
+    found: Dict[str, List[float]] = {}
+    for r in report_rows(report):
+        name = row_dim(r, 0).strip().lower()
+        key = {"date_range_0": "current", "date_range_1": "previous"}.get(name, name)
+        if key in ("current", "previous") and key not in found:
+            found[key] = [row_metric(r, i) for i in range(n)]
+    return (_totals_from_values(found.get("current", [])), _totals_from_values(found.get("previous", [])))
+
+
+def _ga_date(value: str) -> Optional[str]:
+    if not re.fullmatch(r"[0-9]{8}", value or ""):
+        return None
+    iso = f"{value[:4]}-{value[4:6]}-{value[6:]}"
+    try:
+        date.fromisoformat(iso)
+    except ValueError:
+        return None
+    return iso
+
+
+def _report_end(daily_report: Any, today: Optional[date]) -> Optional[date]:
+    """The property's today; when the time zone is unknown (no `today`), the
+    latest GA date (at most the property's yesterday) may move the UTC-based
+    today forward (property ahead of UTC)."""
+    if today is not None:
+        return today
+    latest = None
+    for r in report_rows(daily_report):
+        iso = _ga_date(row_dim(r, 0))
+        if iso and (latest is None or iso > latest):
+            latest = iso
+    utc_today = datetime.now(timezone.utc).date()
+    if latest and date.fromisoformat(latest) + timedelta(days=1) > utc_today:
+        return date.fromisoformat(latest) + timedelta(days=1)
+    return utc_today
+
+
+def _sum_rows(report: Any, key_fn: Callable[[dict], Any], metrics: Sequence[str]) -> Dict[Any, Dict[str, float]]:
+    agg: Dict[Any, Dict[str, float]] = {}
+    for r in report_rows(report):
+        k = key_fn(r)
+        if k is None:
+            continue
+        slot = agg.setdefault(k, {m: 0.0 for m in metrics})
+        for i, mname in enumerate(metrics):
+            slot[mname] += row_metric(r, i)
+    return agg
+
+
+def _ranked(agg: Dict[Any, Dict[str, float]], sort_by: str, limit: int,
+            build: Callable[[Any, Dict[str, float]], Dict[str, Any]]) -> List[Dict[str, Any]]:
+    items = sorted(agg.items(), key=lambda kv: (-kv[1][sort_by], str(kv[0])))[:limit]
+    return [build(k, v) for k, v in items]
+
+
+def parse_report(days: int, highlight_source: Optional[str], reports: Dict[str, Any],
+                 today: Optional[date] = None) -> Dict[str, Any]:
+    """The GA part of GET /report from the named reports (see report_requests)."""
+    prop_today = _report_end(reports.get("daily"), today)
+    result = empty_report(days, highlight_source, prop_today)
+    result["time_zone"] = report_time_zone(reports)
+    result["totals"], result["previous"] = parse_report_totals(reports.get("totals"))
+
+    daily = _sum_rows(reports.get("daily"), lambda r: _ga_date(row_dim(r, 0)),
+                      ("users", "sessions", "page_views"))
+    result["daily"] = [{"date": p["date"],
+                        "users": to_int(daily.get(p["date"], {}).get("users", 0)),
+                        "sessions": to_int(daily.get(p["date"], {}).get("sessions", 0)),
+                        "page_views": to_int(daily.get(p["date"], {}).get("page_views", 0))}
+                       for p in result["daily"]]
+
+    def lab(i: int) -> Callable[[dict], str]:
+        return lambda r: _label(row_dim(r, i))
+
+    result["countries"] = _ranked(
+        _sum_rows(reports.get("countries"), lab(0), ("users", "sessions")), "users", 15,
+        lambda k, v: {"country": k, "users": to_int(v["users"]), "sessions": to_int(v["sessions"])})
+    result["cities"] = _ranked(
+        _sum_rows(reports.get("cities"), lambda r: (_label(row_dim(r, 0)), _label(row_dim(r, 1))), ("users",)),
+        "users", 10, lambda k, v: {"city": k[0], "country": k[1], "users": to_int(v["users"])})
+    result["channels"] = _ranked(
+        _sum_rows(reports.get("channels"), lab(0), ("sessions", "users")), "sessions", 20,
+        lambda k, v: {"channel": k, "sessions": to_int(v["sessions"]), "users": to_int(v["users"])})
+    result["sources"] = _ranked(
+        _sum_rows(reports.get("sources"), lambda r: (_label(row_dim(r, 0)), _label(row_dim(r, 1))),
+                  ("sessions", "users")), "sessions", 10,
+        lambda k, v: {"source": k[0], "medium": k[1], "sessions": to_int(v["sessions"]),
+                      "users": to_int(v["users"])})
+
+    # pages: merged per path; the title is the one with the most views
+    pages: Dict[str, Dict[str, Any]] = {}
+    for r in report_rows(reports.get("pages")):
+        path = _label(row_dim(r, 0))
+        title = (row_dim(r, 1) or "").strip()
+        views, users, secs = row_metric(r, 0), row_metric(r, 1), row_metric(r, 2)
+        p = pages.setdefault(path, {"views": 0.0, "users": 0.0, "secs": 0.0, "title": "", "title_views": -1.0})
+        p["views"] += views
+        p["users"] += users
+        p["secs"] += secs
+        if title and title != "(not set)" and views > p["title_views"]:
+            p["title"], p["title_views"] = title, views
+    result["pages"] = [
+        {"path": path, "title": p["title"] or path, "views": to_int(p["views"]), "users": to_int(p["users"]),
+         "avg_engagement_seconds": round(p["secs"] / p["users"], 1) if p["users"] else 0.0}
+        for path, p in sorted(pages.items(), key=lambda kv: (-kv[1]["views"], kv[0]))[:10]
+    ]
+    result["landing_pages"] = _ranked(
+        _sum_rows(reports.get("landing_pages"), lab(0), ("sessions",)), "sessions", 10,
+        lambda k, v: {"page": k, "sessions": to_int(v["sessions"])})
+    result["devices"] = _ranked(_sum_rows(reports.get("devices"), lab(0), ("users",)), "users", 10,
+                                lambda k, v: {"device": k, "users": to_int(v["users"])})
+    result["browsers"] = _ranked(_sum_rows(reports.get("browsers"), lab(0), ("users",)), "users", 6,
+                                 lambda k, v: {"browser": k, "users": to_int(v["users"])})
+    result["os"] = _ranked(_sum_rows(reports.get("os"), lab(0), ("users",)), "users", 6,
+                           lambda k, v: {"os": k, "users": to_int(v["users"])})
+
+    nvr = _sum_rows(reports.get("new_vs_returning"), lambda r: row_dim(r, 0).strip().lower() or None, ("users",))
+    result["new_vs_returning"] = [{"type": t, "users": to_int(nvr.get(t, {}).get("users", 0))}
+                                  for t in ("new", "returning")]
+    result["events"] = _ranked(
+        _sum_rows(reports.get("events"), lambda r: (row_dim(r, 0) or "").strip() or None, ("count",)),
+        "count", 15, lambda k, v: {"event": k, "count": to_int(v["count"])})
+
+    if (highlight_source or "").strip():
+        et = reports.get("email_totals")
+        result["email_ga"] = {
+            "sessions": to_int(report_total(et, 0)),
+            "users": to_int(report_total(et, 1)),
+            "key_events": to_int(report_total(et, 2)),
+            "by_campaign": _ranked(
+                _sum_rows(reports.get("email_by_campaign"), lab(0), ("sessions",)), "sessions", 20,
+                lambda k, v: {"campaign": k, "sessions": to_int(v["sessions"])}),
+            "by_sender": _ranked(
+                _sum_rows(reports.get("email_by_sender"), lab(0), ("sessions",)), "sessions", 20,
+                lambda k, v: {"sender": k, "sessions": to_int(v["sessions"])}),
+        }
+    return result
+
+
+def run_report_batches(session: Any, property_id: str, named: List[Tuple[str, dict]]) -> Dict[str, Any]:
+    """batchRunReports for (name, request) pairs: groups of at most 5, the
+    groups requested in parallel (bounded by _MAX_PARALLEL). {name: report}."""
+    pid = require_property_id(property_id)
+    groups = chunks(named)
+    url = f"{DATA_API}/properties/{pid}:batchRunReports"
+    answers = run_parallel({
+        f"batch{i}": functools.partial(_call, session, "POST", url, {"requests": [body for _, body in group]})
+        for i, group in enumerate(groups)
+    })
+    reports: Dict[str, Any] = {}
+    for i, group in enumerate(groups):
+        data = answers.get(f"batch{i}") or {}
+        got = data.get("reports") if isinstance(data.get("reports"), list) else []
+        for j, (name, _) in enumerate(group):
+            reports[name] = got[j] if j < len(got) and isinstance(got[j], dict) else {}
+    return reports
+
+
+def fetch_report(session: Any, property_id: str, days: int, highlight_source: Optional[str]) -> Dict[str, Any]:
+    """The website report: up to 16 reports in 4 batches, requested in
+    parallel. Dates follow the property's own time zone (GA metadata)."""
+    reports = run_report_batches(session, property_id, report_requests(days, highlight_source))
+    today = property_today(report_time_zone(reports))
+    return parse_report(days, highlight_source, reports, today=today)
 
 
 # ---------------------------------------------------------------------------

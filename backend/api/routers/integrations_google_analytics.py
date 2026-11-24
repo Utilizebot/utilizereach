@@ -10,6 +10,7 @@ Google Analytics 4 integration (one read-only GA4 connection per brand).
     DELETE /api/integrations/google-analytics             settings.manage
     GET    /api/integrations/google-analytics/realtime    analytics.view
     GET    /api/integrations/google-analytics/summary     analytics.view  (?days=1|7|28|30|90)
+    GET    /api/integrations/google-analytics/report      analytics.view  (?days=7|28|90; GA + own email tracking)
 
 The provider logic (OAuth, GA Admin/Data API calls, parsing, error mapping,
 caching) lives in integrations/google_analytics.py; this module owns the
@@ -42,6 +43,7 @@ row goes through serialize_status() before leaving the API.
 from __future__ import annotations
 
 import base64
+import contextvars
 import functools
 import hashlib
 import hmac
@@ -814,4 +816,231 @@ async def ga_summary(days: int = Query(7, description="1, 7, 28, 30 or 90"),
         payload["error"] = err.to_dict()
     else:
         _clear_error(brand_id, row)
+    return payload
+
+
+# ============================================================================
+# Website analytics page: GET /report (GA + UtilizeReach's own email tracking)
+# ============================================================================
+
+# Internal test sends (sent_emails.variant = 'TEST') never count.
+_NOT_TEST = "upper(COALESCE(se.variant, '')) <> 'TEST'"
+# Sender = the mailbox's persona name, else the from_email local-part.
+_SENDER = ("COALESCE(NULLIF(btrim(ea.sender_name), ''), NULLIF(split_part(COALESCE(se.from_email, ''), '@', 1), ''), '')")
+# Every tenant table in the join is scoped to the brand (docs/MULTIBRAND.md rule 2).
+_JOINS = ("LEFT JOIN campaigns c ON c.id = se.campaign_id AND c.brand_id = %s "
+          "LEFT JOIN email_accounts ea ON ea.id = se.email_account_id AND ea.brand_id = %s ")
+
+_SQL_SENDS = (
+    f"SELECT COALESCE(c.name, '') AS campaign, {_SENDER} AS sender, "
+    "to_char((se.sent_at AT TIME ZONE %s)::date, 'YYYY-MM-DD') AS day, count(*) AS n "
+    f"FROM sent_emails se {_JOINS}"
+    f"WHERE se.brand_id = %s AND {_NOT_TEST} AND se.sent_at >= %s AND se.sent_at < %s "
+    "GROUP BY 1, 2, 3"
+)
+# Opens in the period; an "open" of a bounced email is a scanner, not a person.
+_SQL_OPENS = (
+    f"SELECT COALESCE(c.name, '') AS campaign, {_SENDER} AS sender, count(*) AS n "
+    f"FROM sent_emails se {_JOINS}"
+    f"WHERE se.brand_id = %s AND {_NOT_TEST} AND se.bounced_at IS NULL "
+    "AND se.opened_at >= %s AND se.opened_at < %s "
+    "GROUP BY 1, 2"
+)
+# One row per clicked email (email_clicks rows in the period, or the
+# email's own clicked_at), counted on the day of its first click.
+_SQL_CLICKS = (
+    f"SELECT COALESCE(c.name, '') AS campaign, {_SENDER} AS sender, "
+    "to_char((COALESCE(k.first_at, se.clicked_at) AT TIME ZONE %s)::date, 'YYYY-MM-DD') AS day, "
+    "count(*) AS emails, COALESCE(sum(GREATEST(COALESCE(k.n, 0), 1)), 0) AS clicks "
+    "FROM sent_emails se "
+    "LEFT JOIN (SELECT ec.sent_email_id, count(*) AS n, min(ec.clicked_at) AS first_at "
+    "           FROM email_clicks ec WHERE ec.brand_id = %s AND ec.clicked_at >= %s AND ec.clicked_at < %s "
+    "           GROUP BY ec.sent_email_id) k ON k.sent_email_id = se.id "
+    f"{_JOINS}"
+    f"WHERE se.brand_id = %s AND {_NOT_TEST} AND se.bounced_at IS NULL "
+    "AND (k.sent_email_id IS NOT NULL OR (se.clicked_at >= %s AND se.clicked_at < %s)) "
+    "GROUP BY 1, 2, 3"
+)
+
+_NO_CAMPAIGN = "(no campaign)"
+_NO_SENDER = "(unknown sender)"
+
+
+def empty_email_tracking(start: str, end: str) -> Dict[str, Any]:
+    return {"sent": 0, "opened": 0, "clicked_emails": 0, "total_clicks": 0,
+            "by_campaign": [], "by_sender": [],
+            "daily": [{"date": d, "sent": 0, "clicked": 0} for d in ga._days_between(start, end)]}
+
+
+def _safe_zone(tz_name: Optional[str]) -> str:
+    if tz_name and ga.property_today(tz_name) is not None:
+        return tz_name
+    return "UTC"
+
+
+def _period_bounds(start: str, end: str, tz_name: str):
+    """[start 00:00, end+1 00:00) in the zone, as aware datetimes."""
+    from datetime import date as _date, time as _time
+    from zoneinfo import ZoneInfo
+
+    zone = ZoneInfo(tz_name)
+    lo = datetime.combine(_date.fromisoformat(start), _time(0), tzinfo=zone)
+    hi = datetime.combine(_date.fromisoformat(end) + timedelta(days=1), _time(0), tzinfo=zone)
+    return lo, hi
+
+
+def summarize_email_tracking(start: str, end: str, sends: list, opens: list, clicks: list) -> Dict[str, Any]:
+    """Fold the three grouped queries into the email_tracking object."""
+    out = empty_email_tracking(start, end)
+    camp: Dict[str, Dict[str, int]] = {}
+    send: Dict[str, Dict[str, int]] = {}
+    daily = {d["date"]: d for d in out["daily"]}
+
+    def bump(rowd: dict, field: str, n: int) -> None:
+        c = (rowd.get("campaign") or "").strip() or _NO_CAMPAIGN
+        s = (rowd.get("sender") or "").strip() or _NO_SENDER
+        for agg, key in ((camp, c), (send, s)):
+            slot = agg.setdefault(key, {"sent": 0, "opened": 0, "clicked": 0})
+            slot[field] += n
+
+    for r in sends or []:
+        n = int(r.get("n") or 0)
+        out["sent"] += n
+        bump(r, "sent", n)
+        if r.get("day") in daily:
+            daily[r["day"]]["sent"] += n
+    for r in opens or []:
+        n = int(r.get("n") or 0)
+        out["opened"] += n
+        bump(r, "opened", n)
+    for r in clicks or []:
+        n = int(r.get("emails") or 0)
+        out["clicked_emails"] += n
+        out["total_clicks"] += int(r.get("clicks") or 0)
+        bump(r, "clicked", n)
+        if r.get("day") in daily:
+            daily[r["day"]]["clicked"] += n
+
+    def ranked(agg: Dict[str, Dict[str, int]], key: str) -> list:
+        items = sorted(agg.items(), key=lambda kv: (-kv[1]["sent"], -kv[1]["clicked"], kv[0]))
+        return [{key: k, **v} for k, v in items[:20]]
+
+    out["by_campaign"] = ranked(camp, "campaign")
+    out["by_sender"] = ranked(send, "sender")
+    return out
+
+
+def load_email_tracking(brand_id: str, start: str, end: str, tz_name: Optional[str]) -> Dict[str, Any]:
+    """UtilizeReach's own send / open / click numbers for the period, from
+    sent_emails + email_clicks (+ campaigns, email_accounts for names).
+    Brand-scoped on every table; TEST sends excluded."""
+    zone = _safe_zone(tz_name)
+    lo, hi = _period_bounds(start, end, zone)
+    b = str(brand_id)
+    sends = execute_sql(_SQL_SENDS, [zone, b, b, b, lo, hi])
+    opens = execute_sql(_SQL_OPENS, [b, b, b, lo, hi])
+    clicks = execute_sql(_SQL_CLICKS, [zone, b, lo, hi, b, b, b, lo, hi])
+    return summarize_email_tracking(start, end, sends, opens, clicks)
+
+
+EMAIL_TRACKING_TTL = 60   # seconds
+
+
+def _cached_email_tracking(key: tuple, load: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
+    """load() through ga.CACHE for EMAIL_TRACKING_TTL. The key starts with
+    the brand id, so ga.invalidate_brand drops it too. Errors are not cached."""
+    hit = ga.CACHE.get(key, EMAIL_TRACKING_TTL)
+    if hit is not None:
+        return hit
+    data = load()
+    ga.CACHE.set(key, data)
+    return data
+
+
+def report_notes(payload: Dict[str, Any]) -> list:
+    """Short, plain sentences the page shows under the numbers. Only what the
+    page cannot tell by itself: the cookie-banner sentence and the
+    "connect Google Analytics" hint are part of the page (and of `error`),
+    so they are not repeated here."""
+    notes = []
+    err = payload.get("error") or {}
+    has_ga = bool(payload.get("connected")) and (not err or bool(payload.get("cached")))
+    if has_ga:
+        if not payload.get("highlight_source"):
+            notes.append("No outreach source is set, so visits from your emails cannot be picked out in "
+                         "Google Analytics. Set it in Settings -> Integrations.")
+        notes.append("Google Analytics can still update the numbers of the last day or two.")
+    if payload.get("email_tracking_error"):
+        notes.append("UtilizeReach's own email numbers could not be loaded right now.")
+    return notes
+
+
+@router.get("/report")
+async def ga_report(days: int = Query(28, description="7, 28 or 90"),
+                    current_user: dict = Depends(require_permission("analytics.view"))):
+    """Everything for the Website analytics page: visits, users, page views
+    and engagement (with the previous period), daily series, countries,
+    cities, channels, sources, pages, landing pages, devices, browsers, OS,
+    new vs returning, events, GA sessions from the outreach source - and,
+    always (even without GA), UtilizeReach's own email send/open/click
+    numbers for the same dates. GA part cached 5 min per brand."""
+    if days not in ga.REPORT_DAYS:
+        raise HTTPException(status_code=400,
+                            detail=f"days must be one of {', '.join(str(d) for d in ga.REPORT_DAYS)}")
+    brand_id = tenancy.require_brand()
+    row = _load_row(brand_id)
+    cfg = normalize_config(row)
+    source = _effective_source(row, brand_catalog.get_brand(brand_id))
+    payload: Dict[str, Any] = {"connected": connection_status(row) == "connected",
+                               "property_id": cfg["property_id"],
+                               "property_name": cfg["property_name"]}
+    payload.update(ga.empty_report(days, source))
+    payload["cached"] = False
+
+    gate = _dashboard_gate(row, current_user)
+    if gate:
+        payload["error"] = gate.to_dict()
+    else:
+        token, pid = row["refresh_token"], cfg["property_id"]
+
+        def fetch():
+            with ga.authorized_session(token, brand_id) as session:
+                return ga.fetch_report(session, pid, days, source)
+
+        key = (brand_id, "report", pid, days, source.lower())
+        try:
+            data, cached, err = await _in_ga_thread(ga.cached, key, ga.REPORT_TTL, fetch)
+        except GAError as e:
+            _record_error(brand_id, row, e)
+            payload["error"] = e.to_dict()
+            payload["connected"] = e.code != ga.RECONNECT_REQUIRED
+        else:
+            payload.update(data)
+            payload["cached"] = cached
+            if err is not None:
+                payload["error"] = err.to_dict()
+            else:
+                _clear_error(brand_id, row)
+
+    # UtilizeReach's own tracking: not GA data, so it is shown even when GA
+    # is not connected, failing or hidden from the dashboard.
+    # Three aggregate queries (heavy on 90 days): off the event loop, on the
+    # default thread pool (not the GA limiter), carrying the brand context
+    # (MULTIBRAND rule 8). Cached briefly per brand + dates + zone.
+    rng = payload["range"]
+    zone = payload.get("time_zone")
+    tkey = (brand_id, "email_tracking", rng["start"], rng["end"], zone or "UTC")
+
+    def tracking():
+        return load_email_tracking(brand_id, rng["start"], rng["end"], zone)
+
+    try:
+        payload["email_tracking"] = await anyio.to_thread.run_sync(
+            contextvars.copy_context().run, _cached_email_tracking, tkey, tracking)
+    except Exception as e:
+        log.warning("GA report: email tracking query failed for brand %s: %s", brand_id, type(e).__name__)
+        payload["email_tracking"] = empty_email_tracking(rng["start"], rng["end"])
+        payload["email_tracking_error"] = True
+    payload["notes"] = report_notes(payload)
+    payload.pop("email_tracking_error", None)
     return payload

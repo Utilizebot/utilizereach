@@ -17,6 +17,7 @@ import {
   ChevronDown,
   Check,
   Building2,
+  Globe,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { logout } from '../lib/auth';
@@ -37,6 +38,7 @@ const allNavItems = [
   { path: '/email-accounts',  label: 'Accounts',      icon: Users,           gradient: 'from-purple-600 to-indigo-600' },
   { path: '/scraper',         label: 'Scraper',       icon: Search,          gradient: 'from-orange-600 to-red-600'    },
   { path: '/outbound-analytics', label: 'Analytics',  icon: BarChart3,       gradient: 'from-blue-600 to-cyan-600'     },
+  { path: '/website-analytics', label: 'Website',    icon: Globe,           gradient: 'from-indigo-600 to-blue-600'   },
   { path: '/winning',         label: 'Winning',      icon: Trophy,          gradient: 'from-amber-500 to-orange-600' },
   { path: '/agent-stream',    label: 'Stream',        icon: Radio,           gradient: 'from-violet-600 to-indigo-600' },
   { path: '/social-media',   label: 'Social',        icon: Share2,          gradient: 'from-pink-500 to-violet-600'   },

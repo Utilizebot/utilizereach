@@ -56,3 +56,29 @@ export function shortDate(ymd: string): string {
   const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
+
+/** 83 -> "1m 23s", 7 -> "7s", 3725 -> "1h 2m". */
+export function fmtDuration(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds || 0));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) {
+    const m = Math.floor(s / 60);
+    const rest = s % 60;
+    return rest ? `${m}m ${rest}s` : `${m}m`;
+  }
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return m ? `${h}h ${m}m` : `${h}h`;
+}
+
+/** Percentage change from `previous` to `current` (null when there is no previous value). */
+export function pctChange(current: number, previous: number): number | null {
+  if (!previous || previous <= 0) return null;
+  return ((current - previous) / previous) * 100;
+}
+
+/** Whole-number rate in percent, or null when the base is 0. */
+export function ratePct(part: number, whole: number): number | null {
+  if (!whole || whole <= 0) return null;
+  return Math.round((part / whole) * 1000) / 10;
+}

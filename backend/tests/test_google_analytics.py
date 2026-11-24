@@ -169,6 +169,9 @@ class FakeDB:
         self.mailboxes: set = set()
         self.users: Dict[str, dict] = {USER_ID: {"id": USER_ID, "is_active": True, "is_platform_admin": False}}
         self.statements: List[tuple] = []
+        self.tracking: Dict[str, List[dict]] = {}
+        self.tracking_queries: List[tuple] = []
+        self.tracking_error = False
 
     def __call__(self, sql: str, params=None):
         params = list(params or [])
@@ -208,6 +211,21 @@ class FakeDB:
         if "FROM sales_reps" in s:
             u = self.users.get(params[0])
             return [dict(u)] if u else []
+        if "FROM sent_emails se" in s:
+            # website report: own email tracking. Every tenant table brand-scoped,
+            # internal TEST sends excluded, and the brand is the only brand param.
+            assert not system
+            for alias in ("se", "c", "ea") + (("ec",) if "email_clicks" in s else ()):
+                assert f"{alias}.brand_id = %s" in s, (alias, s)
+            assert "<> 'TEST'" in s
+            assert s.count("%s") == len(params)
+            brands = [p for p in params if isinstance(p, str) and re.fullmatch(r"[0-9a-f-]{36}", p)]
+            assert brands and set(brands) == {tenancy.current_brand()}, params
+            if self.tracking_error:
+                raise RuntimeError("db down")
+            kind = "clicks" if "email_clicks" in s else ("opens" if "opened_at >=" in s else "sends")
+            self.tracking_queries.append((kind, params))
+            return [dict(r) for r in self.tracking.get(kind, [])]
         raise AssertionError(f"unexpected SQL: {s}")
 
 
@@ -1297,3 +1315,277 @@ def test_hidden_from_dashboard_means_hidden_from_viewers(db, monkeypatch):
 
     out = run(gar.ga_realtime(current_user=ADMIN))  # admins can still check the data
     assert "error" not in out and out["active_users"] == 7
+
+
+# ---------------------------------------------------------------------------
+# Website analytics page: GET /report
+# ---------------------------------------------------------------------------
+
+REPORT_TZ = "Etc/GMT-8"  # UTC+8 (POSIX sign inverted)
+
+
+def report_handler(method, url, body):
+    """Fixture answers for every report of ga.report_requests (no network)."""
+    assert method == "POST" and url.endswith(f"/properties/{PROPERTY}:batchRunReports")
+    assert 1 <= len(body["requests"]) <= 5
+    meta = {"timeZone": REPORT_TZ, "currencyCode": "USD"}
+    reports = []
+    for req in body["requests"]:
+        dims = [d["name"] for d in req.get("dimensions", [])]
+        filtered = "dimensionFilter" in req
+        rows: List[dict] = []
+        if not dims and not filtered:
+            assert [r["name"] for r in req["dateRanges"]] == ["current", "previous"]
+            # GA adds the dateRange dimension when there are two ranges
+            rows = [row(["previous"], ["10", "8", "20", "40", "0.5", "300", "90", "1"]),
+                    row(["current"], ["19", "15", "45", "120", "0.62", "950", "400", "3"])]
+        elif dims == ["date"]:
+            rows = [row(["20261120"], ["4", "6", "12"]), row(["20261122"], ["9", "11", "30"]),
+                    row(["bad"], ["1", "1", "1"])]
+        elif dims == ["country"]:
+            rows = [row(["Exampleland"], ["12", "30"]), row(["Otherland"], ["5", "9"]), row([""], ["2", "6"])]
+        elif dims == ["city", "country"]:
+            rows = [row(["Example City", "Exampleland"], ["8"]), row(["(not set)", "Otherland"], ["3"])]
+        elif dims == ["sessionDefaultChannelGroup"]:
+            rows = [row(["Direct"], ["20", "10"]), row(["Email"], ["15", "6"]), row(["Organic Search"], ["10", "5"])]
+        elif dims == ["sessionSource", "sessionMedium"]:
+            rows = [row(["(direct)", "(none)"], ["20", "10"]), row(["example-outreach", "email"], ["15", "6"])]
+        elif dims == ["pagePath", "pageTitle"]:
+            rows = [row(["/", "Home"], ["60", "12", "600"]), row(["/", "Home - Example"], ["10", "3", "30"]),
+                    row(["/pricing", "Pricing"], ["30", "6", "120"]), row(["/blog", "(not set)"], ["5", "0", "0"])]
+        elif dims == ["landingPage"]:
+            rows = [row(["/"], ["30"]), row(["/pricing"], ["10"])]
+        elif dims == ["deviceCategory"]:
+            rows = [row(["desktop"], ["12"]), row(["mobile"], ["7"])]
+        elif dims == ["browser"]:
+            rows = [row(["Chrome"], ["11"]), row(["Safari"], ["6"])]
+        elif dims == ["operatingSystem"]:
+            rows = [row(["Windows"], ["9"]), row(["iOS"], ["5"])]
+        elif dims == ["newVsReturning"]:
+            rows = [row(["new"], ["15"]), row(["returning"], ["4"]), row(["(not set)"], ["1"])]
+        elif dims == ["eventName"]:
+            rows = [row(["page_view"], ["120"]), row(["click"], ["14"]), row(["scroll"], ["40"])]
+        elif not dims and filtered:
+            rows = [row([], ["15", "6", "2"])]
+        elif dims == ["sessionCampaignName"]:
+            rows = [row(["spring_launch"], ["12"]), row(["(not set)"], ["3"])]
+        elif dims == ["sessionManualTerm"]:
+            rows = [row(["sam_lee"], ["15"])]
+        else:
+            raise AssertionError(dims)
+        rep: Dict[str, Any] = {"metadata": meta}
+        if rows:
+            rep["rows"] = rows
+        reports.append(rep)
+    return FakeResponse(200, {"reports": reports})
+
+
+def test_report_requests_ranges_and_batches():
+    reqs = ga.report_requests(7, "example-outreach")
+    names = [n for n, _ in reqs]
+    assert len(reqs) == 16 and len(set(names)) == 16
+    assert [len(c) for c in ga.chunks(reqs)] == [5, 5, 5, 1]
+    totals = dict(reqs)["totals"]
+    assert totals["dateRanges"] == [
+        {"startDate": "7daysAgo", "endDate": "yesterday", "name": "current"},
+        {"startDate": "14daysAgo", "endDate": "8daysAgo", "name": "previous"},
+    ]
+    assert [m["name"] for m in totals["metrics"]] == list(ga._REPORT_TOTAL_METRICS)
+    assert all(len(r.get("metrics", [])) <= 10 for _, r in reqs)
+    for name, r in reqs:
+        if name != "totals":
+            assert r["dateRanges"] == [{"startDate": "7daysAgo", "endDate": "yesterday", "name": "current"}]
+    for name in ("email_totals", "email_by_campaign", "email_by_sender"):
+        assert dict(reqs)[name]["dimensionFilter"] == ga.source_filter("example-outreach")
+    assert len(ga.report_requests(90, "")) == 13  # no source -> no email reports
+    assert ga.report_date_ranges(90)[1] == {"startDate": "180daysAgo", "endDate": "91daysAgo", "name": "previous"}
+    for bad in (1, 30, 3):
+        with pytest.raises(ValueError):
+            ga.report_requests(bad, "")
+
+
+def test_report_period_dates():
+    from datetime import date
+    # today (2026-11-24) is left out: both periods are whole days
+    p = ga.report_period(7, date(2026, 11, 24))
+    assert p == {"range": {"start": "2026-11-17", "end": "2026-11-23"},
+                 "previous_range": {"start": "2026-11-10", "end": "2026-11-16"}}
+    p = ga.report_period(28, date(2024, 3, 1))
+    assert p["range"] == {"start": "2024-02-02", "end": "2024-02-29"}
+    assert p["previous_range"] == {"start": "2024-01-05", "end": "2024-02-01"}
+
+
+def test_fetch_report_parses_every_section(monkeypatch):
+    from datetime import date
+    monkeypatch.setattr(ga, "property_today", lambda tz_name: date(2026, 11, 23) if tz_name == REPORT_TZ else None)
+    session = FakeSession(report_handler)
+    data = ga.fetch_report(session, PROPERTY, 7, "example-outreach")
+    assert sorted(len(c[2]["requests"]) for c in session.calls) == [1, 5, 5, 5]
+
+    assert data["days"] == 7 and data["time_zone"] == REPORT_TZ
+    assert data["range"] == {"start": "2026-11-16", "end": "2026-11-22"}
+    assert data["totals"] == {"users": 19, "new_users": 15, "sessions": 45, "page_views": 120,
+                              "engagement_rate": 0.62, "avg_engagement_seconds": 50.0, "events": 400,
+                              "key_events": 3}
+    assert data["previous"] == {"users": 10, "new_users": 8, "sessions": 20, "page_views": 40,
+                                "engagement_rate": 0.5, "avg_engagement_seconds": 30.0, "events": 90,
+                                "key_events": 1}
+    assert [d["date"] for d in data["daily"]] == ["2026-11-16", "2026-11-17", "2026-11-18", "2026-11-19",
+                                                  "2026-11-20", "2026-11-21", "2026-11-22"]
+    assert data["daily"][4] == {"date": "2026-11-20", "users": 4, "sessions": 6, "page_views": 12}
+    assert data["daily"][6] == {"date": "2026-11-22", "users": 9, "sessions": 11, "page_views": 30}
+    assert sum(d["sessions"] for d in data["daily"]) == 17
+
+    assert data["countries"] == [{"country": "Exampleland", "users": 12, "sessions": 30},
+                                 {"country": "Otherland", "users": 5, "sessions": 9},
+                                 {"country": "(not set)", "users": 2, "sessions": 6}]
+    assert data["cities"][0] == {"city": "Example City", "country": "Exampleland", "users": 8}
+    assert data["channels"][1] == {"channel": "Email", "sessions": 15, "users": 6}
+    assert data["sources"][1] == {"source": "example-outreach", "medium": "email", "sessions": 15, "users": 6}
+    # pages merged per path; the most-viewed title wins; avg = engagement / users
+    assert data["pages"][0] == {"path": "/", "title": "Home", "views": 70, "users": 15,
+                                "avg_engagement_seconds": 42.0}
+    assert data["pages"][1]["path"] == "/pricing" and data["pages"][1]["avg_engagement_seconds"] == 20.0
+    assert data["pages"][2] == {"path": "/blog", "title": "/blog", "views": 5, "users": 0,
+                                "avg_engagement_seconds": 0.0}
+    assert data["landing_pages"] == [{"page": "/", "sessions": 30}, {"page": "/pricing", "sessions": 10}]
+    assert data["devices"] == [{"device": "desktop", "users": 12}, {"device": "mobile", "users": 7}]
+    assert data["browsers"][0] == {"browser": "Chrome", "users": 11}
+    assert data["os"][1] == {"os": "iOS", "users": 5}
+    assert data["new_vs_returning"] == [{"type": "new", "users": 15}, {"type": "returning", "users": 4}]
+    assert data["events"] == [{"event": "page_view", "count": 120}, {"event": "scroll", "count": 40},
+                              {"event": "click", "count": 14}]
+    assert data["email_ga"] == {"sessions": 15, "users": 6, "key_events": 2,
+                                "by_campaign": [{"campaign": "spring_launch", "sessions": 12},
+                                                {"campaign": "(not set)", "sessions": 3}],
+                                "by_sender": [{"sender": "sam_lee", "sessions": 15}]}
+
+
+def test_parse_report_handles_empty_and_odd_reports():
+    from datetime import date
+    data = ga.parse_report(28, None, {}, today=date(2026, 11, 24))
+    assert data["totals"] == ga.empty_report_totals() and data["previous"] == ga.empty_report_totals()
+    assert len(data["daily"]) == 28 and data["daily"][-1] == {"date": "2026-11-23", "users": 0, "sessions": 0,
+                                                              "page_views": 0}
+    assert data["daily"][0]["date"] == "2026-10-27"
+    for key in ("countries", "cities", "channels", "sources", "pages", "landing_pages", "devices",
+                "browsers", "os", "events"):
+        assert data[key] == []
+    assert data["new_vs_returning"] == [{"type": "new", "users": 0}, {"type": "returning", "users": 0}]
+    assert data["email_ga"] == ga.empty_email_ga() and data["highlight_source"] is None
+
+    # unnamed ranges (date_range_0/1), a missing previous range, junk values
+    cur, prev = ga.parse_report_totals({"rows": [row(["date_range_0"], ["0", "x", "nan", "5"])]})
+    assert cur["users"] == 0 and cur["avg_engagement_seconds"] == 0.0 and cur["page_views"] == 5
+    assert prev == ga.empty_report_totals()
+    # a GA row dated outside the window is dropped, never extends it
+    rep = {"daily": {"rows": [row(["20200101"], ["9", "9", "9"])]}}
+    out = ga.parse_report(7, None, rep, today=date(2026, 11, 24))
+    assert len(out["daily"]) == 7 and sum(d["sessions"] for d in out["daily"]) == 0
+
+
+def test_summarize_email_tracking():
+    sends = [{"campaign": "Spring launch", "sender": "Sam Lee", "day": "2026-11-20", "n": 6},
+             {"campaign": "", "sender": "", "day": "2026-11-21", "n": 2},
+             {"campaign": "Spring launch", "sender": "Alex", "day": "2019-01-01", "n": 1}]
+    opens = [{"campaign": "Spring launch", "sender": "Sam Lee", "n": 3}]
+    clicks = [{"campaign": "Spring launch", "sender": "Sam Lee", "day": "2026-11-21", "emails": 2, "clicks": 5}]
+    out = gar.summarize_email_tracking("2026-11-18", "2026-11-24", sends, opens, clicks)
+    assert (out["sent"], out["opened"], out["clicked_emails"], out["total_clicks"]) == (9, 3, 2, 5)
+    assert out["by_campaign"][0] == {"campaign": "Spring launch", "sent": 7, "opened": 3, "clicked": 2}
+    assert out["by_campaign"][1] == {"campaign": "(no campaign)", "sent": 2, "opened": 0, "clicked": 0}
+    assert out["by_sender"][0] == {"sender": "Sam Lee", "sent": 6, "opened": 3, "clicked": 2}
+    assert {"sender": "(unknown sender)", "sent": 2, "opened": 0, "clicked": 0} in out["by_sender"]
+    assert len(out["daily"]) == 7
+    assert {"date": "2026-11-20", "sent": 6, "clicked": 0} in out["daily"]
+    assert {"date": "2026-11-21", "sent": 2, "clicked": 2} in out["daily"]
+    empty = gar.summarize_email_tracking("2026-11-24", "2026-11-24", [], [], [])
+    assert empty == gar.empty_email_tracking("2026-11-24", "2026-11-24")
+
+
+TRACKING = {"sends": [{"campaign": "Spring launch", "sender": "Sam Lee", "day": "2026-11-20", "n": 40}],
+            "opens": [{"campaign": "Spring launch", "sender": "Sam Lee", "n": 18}],
+            "clicks": [{"campaign": "Spring launch", "sender": "Sam Lee", "day": "2026-11-21", "emails": 9,
+                        "clicks": 12}]}
+
+
+def test_report_endpoint_combines_ga_and_own_tracking(db, monkeypatch):
+    from datetime import date, datetime as dt
+    monkeypatch.setattr(ga, "property_today", lambda tz_name: date(2026, 11, 23) if tz_name == REPORT_TZ else None)
+    db.rows[BRAND] = connected_row()
+    db.tracking = TRACKING
+    session = use_session(monkeypatch, report_handler)
+    out = run(gar.ga_report(days=7, current_user=VIEWER))
+    assert out["connected"] is True and out["cached"] is False and "error" not in out
+    assert out["property_id"] == PROPERTY and out["property_name"] == "Example site"
+    assert out["range"] == {"start": "2026-11-16", "end": "2026-11-22"} and out["days"] == 7
+    assert out["totals"]["sessions"] == 45 and out["previous"]["sessions"] == 20
+    assert out["email_ga"]["sessions"] == 15
+    assert {r["dimensionFilter"]["filter"]["stringFilter"]["value"]
+            for c in session.calls for r in c[2]["requests"] if "dimensionFilter" in r} == {"example-outreach"}
+    et = out["email_tracking"]
+    assert (et["sent"], et["opened"], et["clicked_emails"], et["total_clicks"]) == (40, 18, 9, 12)
+    assert len(et["daily"]) == 7 and et["daily"][-1]["date"] == "2026-11-22"
+    # the cookie-banner sentence lives on the page, not in notes (no duplicate)
+    assert not any("cookie" in n for n in out["notes"])
+    assert FAKE_REFRESH not in json.dumps(out, default=str)
+
+    # the DB window is the GA range, in the property's time zone
+    kinds = [k for k, _ in db.tracking_queries]
+    assert sorted(kinds) == ["clicks", "opens", "sends"]
+    sends_params = dict(db.tracking_queries)["sends"]
+    assert sends_params[0] == REPORT_TZ
+    lo, hi = [p for p in sends_params if isinstance(p, dt)]
+    assert lo.isoformat() == "2026-11-16T00:00:00+08:00" and hi.isoformat() == "2026-11-23T00:00:00+08:00"
+
+    again = run(gar.ga_report(days=7, current_user=VIEWER))
+    assert again["cached"] is True and len(session.calls) == 4
+    assert again["email_tracking"]["sent"] == 40
+    assert len(db.tracking_queries) == 3  # own tracking cached briefly (EMAIL_TRACKING_TTL)
+    with pytest.raises(HTTPException) as exc:
+        run(gar.ga_report(days=30, current_user=VIEWER))
+    assert exc.value.status_code == 400
+
+
+def test_report_without_ga_still_shows_own_tracking(db, monkeypatch):
+    session = use_session(monkeypatch, lambda m, u, b: AssertionError("Google must not be called"))
+    db.tracking = TRACKING
+    out = run(gar.ga_report(days=28, current_user=VIEWER))
+    assert out["connected"] is False and out["error"]["code"] == "not_connected"
+    assert out["totals"] == ga.empty_report_totals() and out["countries"] == [] and len(out["daily"]) == 28
+    assert out["email_ga"] == ga.empty_email_ga()
+    assert out["email_tracking"]["clicked_emails"] == 9 and len(out["email_tracking"]["daily"]) == 28
+    assert dict(db.tracking_queries)["sends"][0] == "UTC"
+    # "connect GA" is said by the page's state card (error.code), not repeated in notes
+    assert not any("Google Analytics, connected in" in n for n in out["notes"])
+    assert session.calls == []
+
+
+def test_report_hidden_from_viewers_but_own_tracking_stays(db, monkeypatch):
+    db.rows[BRAND] = connected_row(config={"property_id": PROPERTY, "show_on_dashboard": False})
+    db.tracking = TRACKING
+    session = use_session(monkeypatch, report_handler)
+    out = run(gar.ga_report(days=7, current_user=VIEWER))
+    assert out["error"]["code"] == "not_connected" and "switched off" in out["error"]["message"]
+    assert out["totals"] == ga.empty_report_totals() and out["pages"] == [] and session.calls == []
+    assert out["email_tracking"]["sent"] == 40
+    out = run(gar.ga_report(days=7, current_user=ADMIN))
+    assert "error" not in out and out["totals"]["users"] == 19
+
+
+def test_report_errors_and_tracking_failure_never_500(db, monkeypatch):
+    db.rows[BRAND] = connected_row()
+    db.tracking_error = True
+    use_session(monkeypatch, lambda m, u, b: google_error(403, "PERMISSION_DENIED", "no access"))
+    out = run(gar.ga_report(days=28, current_user=VIEWER))
+    assert out["error"]["code"] == "permission_denied" and out["totals"] == ga.empty_report_totals()
+    assert out["email_tracking"]["sent"] == 0 and len(out["email_tracking"]["daily"]) == 28
+    assert any("could not be loaded" in n for n in out["notes"])
+    assert "email_tracking_error" not in out
+    assert db.rows[BRAND]["last_error"]  # a lasting error is remembered on the row, like /summary
+
+
+def test_report_route_is_wired():
+    from fastapi.routing import APIRoute
+    routes = {(r.path, m) for r in gar.router.routes if isinstance(r, APIRoute) for m in r.methods}
+    assert (gar.PREFIX + "/report", "GET") in routes
