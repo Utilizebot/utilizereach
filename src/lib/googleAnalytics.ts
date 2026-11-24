@@ -154,6 +154,130 @@ export const GA_SUMMARY_DAYS = [1, 7, 28, 30, 90] as const;
 export type GaSummaryDays = (typeof GA_SUMMARY_DAYS)[number];
 
 // ---------------------------------------------------------------------------
+// Full website report (/report?days=7|28|90)
+// ---------------------------------------------------------------------------
+
+/** Day ranges the backend accepts for /report. */
+export const GA_REPORT_DAYS = [7, 28, 90] as const;
+export type GaReportDays = (typeof GA_REPORT_DAYS)[number];
+
+export interface GaReportTotals {
+  users: number;
+  new_users: number;
+  sessions: number;
+  page_views: number;
+  /** 0..1 fraction. */
+  engagement_rate: number;
+  avg_engagement_seconds: number;
+  events: number;
+  key_events: number;
+}
+
+export interface GaReportDaily {
+  date: string;
+  users: number;
+  sessions: number;
+  page_views: number;
+}
+
+export interface GaReportCountry {
+  country: string;
+  users: number;
+  sessions: number;
+}
+
+export interface GaReportCity {
+  city: string;
+  country: string;
+  users: number;
+}
+
+export interface GaReportChannel {
+  channel: string;
+  sessions: number;
+  users: number;
+}
+
+export interface GaReportPage {
+  path: string;
+  title: string;
+  views: number;
+  users: number;
+  avg_engagement_seconds: number;
+}
+
+export interface GaReportLanding {
+  page: string;
+  sessions: number;
+}
+
+export interface GaReportEvent {
+  event: string;
+  count: number;
+}
+
+export interface GaReportNewVsReturning {
+  type: 'new' | 'returning';
+  users: number;
+}
+
+/** What Google Analytics saw from the outreach emails (sessionSource = highlight source). */
+export interface GaReportEmailGa {
+  sessions: number;
+  users: number;
+  key_events: number;
+  by_campaign: { campaign: string; sessions: number }[];
+  by_sender: { sender: string; sessions: number }[];
+}
+
+export interface GaTrackingRow {
+  sent: number;
+  opened: number;
+  clicked: number;
+}
+
+/** UtilizeReach's own open / click tracking for the same date range (brand-scoped, tests excluded). */
+export interface GaReportEmailTracking {
+  sent: number;
+  opened: number;
+  clicked_emails: number;
+  total_clicks: number;
+  by_campaign: (GaTrackingRow & { campaign: string })[];
+  by_sender: (GaTrackingRow & { sender: string })[];
+  daily: { date: string; sent: number; clicked: number }[];
+}
+
+export interface GaReport {
+  connected: boolean;
+  property_id: string | null;
+  property_name: string | null;
+  days: number;
+  range: { start: string; end: string } | null;
+  /** utm_source counted as "from your outreach emails". */
+  highlight_source: string | null;
+  fetched_at: string | null;
+  cached: boolean;
+  error?: GaError;
+  totals: GaReportTotals;
+  previous: GaReportTotals;
+  daily: GaReportDaily[];
+  countries: GaReportCountry[];
+  cities: GaReportCity[];
+  channels: GaReportChannel[];
+  sources: GaTrafficSource[];
+  pages: GaReportPage[];
+  landing_pages: GaReportLanding[];
+  devices: { device: string; users: number }[];
+  browsers: { browser: string; users: number }[];
+  os: { os: string; users: number }[];
+  new_vs_returning: GaReportNewVsReturning[];
+  events: GaReportEvent[];
+  email_ga: GaReportEmailGa;
+  email_tracking: GaReportEmailTracking;
+  notes: string[];
+}
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 
@@ -435,6 +559,128 @@ export function normalizeSummary(raw: Raw): GaSummary {
   };
 }
 
+function normTotals(v: unknown): GaReportTotals {
+  const o = obj(v);
+  return {
+    users: num(o.users),
+    new_users: num(o.new_users),
+    sessions: num(o.sessions),
+    page_views: num(o.page_views),
+    engagement_rate: num(o.engagement_rate),
+    avg_engagement_seconds: num(o.avg_engagement_seconds),
+    events: num(o.events),
+    key_events: num(o.key_events),
+  };
+}
+
+const YMD_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** "20261120" or "2026-11-20" -> "2026-11-20" ("" when unusable). */
+function ymd(v: unknown): string {
+  const s = str(v).trim();
+  if (YMD_RE.test(s)) return s;
+  const m = /^(\d{4})(\d{2})(\d{2})$/.exec(s);
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : '';
+}
+
+function byDate<T extends { date: string }>(list: T[]): T[] {
+  return list.filter((d) => d.date).sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function label(v: unknown, fallback = '(not set)'): string {
+  return str(v).trim() || fallback;
+}
+
+export function normalizeReport(raw: Raw): GaReport {
+  const o = obj(raw);
+  const range = obj(o.range);
+  const start = ymd(range.start);
+  const end = ymd(range.end);
+  const emailGa = obj(o.email_ga);
+  const tracking = obj(o.email_tracking);
+  const trackingRow = (r: Raw): GaTrackingRow => ({
+    sent: num(r?.sent),
+    opened: num(r?.opened),
+    clicked: num(r?.clicked),
+  });
+  return {
+    connected: !!o.connected,
+    property_id: strOrNull(o.property_id),
+    property_name: strOrNull(o.property_name),
+    days: num(o.days) || 28,
+    range: start && end ? { start, end } : null,
+    highlight_source: strOrNull(o.highlight_source),
+    fetched_at: strOrNull(o.fetched_at),
+    cached: !!o.cached,
+    error: normError(o.error),
+    totals: normTotals(o.totals),
+    previous: normTotals(o.previous),
+    daily: byDate(
+      arr(o.daily).map((r) => ({
+        date: ymd(r?.date),
+        users: num(r?.users),
+        sessions: num(r?.sessions),
+        page_views: num(r?.page_views),
+      }))
+    ),
+    countries: arr(o.countries).map((r) => ({
+      country: label(r?.country),
+      users: num(r?.users),
+      sessions: num(r?.sessions),
+    })),
+    cities: arr(o.cities).map((r) => ({
+      city: label(r?.city),
+      country: str(r?.country),
+      users: num(r?.users),
+    })),
+    channels: arr(o.channels).map((r) => ({
+      channel: label(r?.channel, 'Unassigned'),
+      sessions: num(r?.sessions),
+      users: num(r?.users),
+    })),
+    sources: arr(o.sources).map((r) => ({
+      source: label(r?.source, '(direct)'),
+      medium: label(r?.medium, '(none)'),
+      sessions: num(r?.sessions),
+      users: num(r?.users),
+    })),
+    pages: arr(o.pages).map((r) => ({
+      path: label(r?.path),
+      title: str(r?.title),
+      views: num(r?.views),
+      users: num(r?.users),
+      avg_engagement_seconds: num(r?.avg_engagement_seconds),
+    })),
+    landing_pages: arr(o.landing_pages).map((r) => ({ page: label(r?.page), sessions: num(r?.sessions) })),
+    devices: arr(o.devices).map((r) => ({ device: label(r?.device), users: num(r?.users) })),
+    browsers: arr(o.browsers).map((r) => ({ browser: label(r?.browser), users: num(r?.users) })),
+    os: arr(o.os).map((r) => ({ os: label(r?.os), users: num(r?.users) })),
+    new_vs_returning: arr(o.new_vs_returning)
+      .map((r) => ({ type: str(r?.type).toLowerCase(), users: num(r?.users) }))
+      .filter((r): r is GaReportNewVsReturning => r.type === 'new' || r.type === 'returning'),
+    events: arr(o.events).map((r) => ({ event: label(r?.event), count: num(r?.count) })),
+    email_ga: {
+      sessions: num(emailGa.sessions),
+      users: num(emailGa.users),
+      key_events: num(emailGa.key_events),
+      by_campaign: arr(emailGa.by_campaign).map((r) => ({ campaign: label(r?.campaign), sessions: num(r?.sessions) })),
+      by_sender: arr(emailGa.by_sender).map((r) => ({ sender: label(r?.sender), sessions: num(r?.sessions) })),
+    },
+    email_tracking: {
+      sent: num(tracking.sent),
+      opened: num(tracking.opened),
+      clicked_emails: num(tracking.clicked_emails),
+      total_clicks: num(tracking.total_clicks),
+      by_campaign: arr(tracking.by_campaign).map((r) => ({ campaign: label(r?.campaign), ...trackingRow(r) })),
+      by_sender: arr(tracking.by_sender).map((r) => ({ sender: label(r?.sender), ...trackingRow(r) })),
+      daily: byDate(
+        arr(tracking.daily).map((r) => ({ date: ymd(r?.date), sent: num(r?.sent), clicked: num(r?.clicked) }))
+      ),
+    },
+    notes: Array.isArray(o.notes) ? o.notes.filter((n): n is string => typeof n === 'string' && n.trim() !== '') : [],
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Endpoints
 // ---------------------------------------------------------------------------
@@ -512,6 +758,24 @@ export async function getGaSummary(days: GaSummaryDays, signal?: AbortSignal): P
   );
   return normalizeSummary(raw);
 }
+
+/**
+ * GET /report?days=7|28|90 - the full website report (traffic, geography,
+ * pages, sources, devices, events) plus UtilizeReach's own email tracking for
+ * the same dates (analytics.view). email_tracking is filled even when Google
+ * Analytics is not connected.
+ */
+export async function fetchReport(days: GaReportDays, signal?: AbortSignal): Promise<GaReport> {
+  const raw = await request<Raw>(
+    `/report?days=${encodeURIComponent(String(days))}`,
+    { signal },
+    'Could not load website analytics'
+  );
+  return normalizeReport(raw);
+}
+
+/** Alias in the naming style of the other endpoint helpers. */
+export const getGaReport = fetchReport;
 
 /** True for a fetch aborted by an AbortController (not a real failure). */
 export function isAbortError(err: unknown): boolean {

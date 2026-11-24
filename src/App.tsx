@@ -12,6 +12,7 @@ import { Emails } from './pages/Emails';
 import { Campaigns } from './pages/Campaigns';
 import { Replies } from './pages/Replies';
 import { OutboundAnalytics } from './pages/OutboundAnalytics';
+import { WebsiteAnalytics } from './pages/WebsiteAnalytics';
 import { WhatsWinning } from './pages/WhatsWinning';
 import { EmailAccounts } from './pages/EmailAccounts';
 import { AgentStream } from './pages/AgentStream';
@@ -167,6 +168,18 @@ function AppContent() {
             <ProtectedRoute>
               <DashboardLayout>
                 <OutboundAnalytics />
+              </DashboardLayout>
+            </ProtectedRoute>
+          }
+        />
+
+        {/* Website analytics (Google Analytics + UtilizeReach email tracking) */}
+        <Route
+          path="/website-analytics"
+          element={
+            <ProtectedRoute requiredPermission="analytics.view">
+              <DashboardLayout>
+                <WebsiteAnalytics />
               </DashboardLayout>
             </ProtectedRoute>
           }

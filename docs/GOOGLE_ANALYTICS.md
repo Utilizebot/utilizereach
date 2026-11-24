@@ -42,7 +42,7 @@ Integrations, for example if your links were tagged by another tool.
 | See the Dashboard cards and the connection status | `analytics.view` | everyone (while *Show on Dashboard* is on) |
 | Connect, pick the property, change the source, show/hide on the Dashboard, disconnect | `settings.manage` | brand admins, platform admins |
 
-*Show on Dashboard* off is enforced by the API too: `/realtime` and
+*Show on Dashboard* off is enforced by the API too: `/realtime`, `/report` (its GA part) and
 `/summary` then return no data to anyone without `settings.manage`.
 
 The connection belongs to the **brand**, not to the person who connected it.
@@ -200,6 +200,66 @@ stored connection (see below).
 | `ga_error=scope_missing` | The analytics permission was unticked | Connect again and allow it |
 | `ga_error=no_refresh_token` / `exchange_failed` / `callback_failed` | Google did not complete the sign-in | Connect again; check the backend logs |
 
+## Website analytics page
+
+`GET /api/integrations/google-analytics/report?days=7|28|90` gives the
+Website analytics page everything it needs, so nobody has to open Google
+Analytics: visits, users, page views and engagement for the period, and the
+same numbers for the period before (for the % change); a daily series
+(zero-filled); top countries, cities, channels, sources, pages, landing
+pages, devices, browsers and operating systems; new vs returning users; the
+top events (`page_view`, `click`, `scroll`, `form_start`, ...); and how the
+outreach emails drive traffic.
+
+```
+{ connected, property_id, property_name, days, range: {start, end}, previous_range, time_zone,
+  highlight_source, fetched_at, cached, error?: {code, message},
+  totals: {users, new_users, sessions, page_views, engagement_rate, avg_engagement_seconds, events, key_events},
+  previous: {same keys}, daily: [{date, users, sessions, page_views}],
+  countries, cities, channels, sources, pages, landing_pages, devices, browsers, os, new_vs_returning, events,
+  email_ga: {sessions, users, key_events, by_campaign, by_sender},
+  email_tracking: {sent, opened, clicked_emails, total_clicks, by_campaign, by_sender, daily},
+  notes: [string] }
+```
+
+**Two sources for email traffic, shown side by side.**
+
+- `email_ga`: GA sessions whose session source is the brand's outreach
+  source (as in the Dashboard panel), by `utm_campaign` and `utm_term`.
+- `email_tracking`: UtilizeReach's own numbers from `sent_emails` and
+  `email_clicks` for the same dates: emails sent, opened and clicked in the
+  period, total clicks, by campaign, by sender (persona name, else the
+  mailbox name before the `@`) and per day. Internal test sends
+  (`variant = 'TEST'`) are left out. Opens and clicks of bounced emails are
+  not counted (they come from scanners). A clicked email is counted once,
+  on the day of its first click in the period.
+
+The website's cookie banner means GA only sees visitors who accept cookies,
+so `email_ga` is usually lower than `email_tracking`. Our own click tracking
+is the reliable number for email clicks; GA shows what those visitors did on
+the site. The page explains this in one plain sentence next to the two email
+cards. `notes` only carries what the page cannot tell by itself (no outreach
+source set, recent days can still change, email numbers failed to load);
+"connect Google Analytics" comes from `error.code`.
+
+How it works:
+
+- 16 GA reports (13 without an outreach source) are sent with
+  `batchRunReports`, 5 per batch, with the batches running in parallel on
+  the GA thread pool. The totals use two date ranges (current and previous).
+- The period is the last N complete days, ending yesterday (like GA's own
+  "Last N days"), and the previous period is the N days before it, so the %
+  change compares whole days. Today is shown by the LIVE strip.
+- Dates follow the GA property's time zone. `email_tracking` uses the same
+  calendar days in that zone (UTC when GA is not connected).
+- The GA part is cached for 5 minutes per brand, property, period and
+  source, with the same error handling as `/summary`. `email_tracking` is
+  read from the database off the event loop (default thread pool, brand
+  context copied) and cached for 60 seconds per brand, dates and time zone.
+- `email_tracking` is always filled, even when GA is not connected, fails, or
+  is hidden from the Dashboard. *Show on Dashboard* off hides only the GA
+  sections from users without `settings.manage`.
+
 ## API reference
 
 All under `/api/integrations/google-analytics`, scoped to the caller's active
@@ -216,8 +276,9 @@ brand.
 | `DELETE /` | settings.manage | `{ok: true}` |
 | `GET /realtime` | analytics.view | `{connected, property_id, active_users, per_minute[30], top_pages, countries, devices, fetched_at, cached, error?}` |
 | `GET /summary?days=7` | analytics.view | `{connected, property_id, days, highlight_source, totals, sources, email{totals, by_campaign, by_sender, daily, landing_pages}, fetched_at, cached, error?}` |
+| `GET /report?days=28` | analytics.view | `days` = 7, 28 or 90 (default 28). See [Website analytics page](#website-analytics-page) |
 
-`/realtime` and `/summary` always answer `200` with an `error: {code, message}`
+`/realtime`, `/summary` and `/report` always answer `200` with an `error: {code, message}`
 object when the data cannot be fetched, so the Dashboard can explain why.
 `/properties`, `/auth`, `/connect` and `/settings` answer with an HTTP error
 and a readable `detail` message.
